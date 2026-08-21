@@ -1,7 +1,6 @@
 import prisma from "../../database/prisma";
 import { validateGeofence } from "../../common/utils/geofence";
-import { mlQueue } from "../../queues/ml.queue";
-import { uploadToS3 } from "../../common/utils/s3Upload";
+import { saveLocalFile } from "../../common/utils/localStorage";
 
 export const createFaceOnboardingService = async (
   userId: string,
@@ -31,6 +30,8 @@ export const createFaceOnboardingService = async (
   }
 
   const school = student.section.standard.school;
+  const standard = student.section.standard;
+  const section = student.section;
 
   const latitude = Number(body.latitude);
   const longitude = Number(body.longitude);
@@ -71,8 +72,11 @@ export const createFaceOnboardingService = async (
       },
     });
 
+  const sanitizedSectionName = section.name.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const relativeDir = `schools/${school.id}/class_${standard.value}/section_${sanitizedSectionName}/onboarding/${student.id}`;
+
   for (const file of files) {
-    const imageUrl = await uploadToS3(file,"face-onboarding");
+    const imageUrl = await saveLocalFile(file, relativeDir);
 
     await prisma.studentFaceImage.create({
       data: {
@@ -95,6 +99,4 @@ export const createFaceOnboardingService = async (
   });
 
   return onboarding;
-
-  // Duplicate removed
-};
+};

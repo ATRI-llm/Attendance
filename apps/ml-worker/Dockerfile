@@ -6,7 +6,7 @@ FROM node:22-alpine AS deps
 WORKDIR /app
 
 COPY apps/ml-worker/package*.json ./
-RUN npm ci --omit=dev
+RUN npm install --omit=dev --prefer-offline
 
 # ── Stage 2: Build TypeScript ─────────────────────────────────────
 FROM node:22-alpine AS builder
@@ -14,7 +14,7 @@ WORKDIR /app
 
 RUN apk add --no-cache openssl
 COPY apps/ml-worker/package*.json apps/ml-worker/tsconfig.json ./
-RUN npm ci
+RUN npm install --prefer-offline
 
 COPY apps/ml-worker/src/ ./src/
 # Prisma schema lives in apps/backend/prisma — copy it for client generation

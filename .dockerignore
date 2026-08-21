@@ -6,6 +6,7 @@
 **/dist
 
 # Python
+**/.venv
 **/venv
 **/env
 **/__pycache__
@@ -22,6 +23,7 @@
 **/*.pt
 **/*.npy
 **/*.csv
+**/requirements_locked.txt
 
 # Old / unused huge folders
 apps/face_attendance

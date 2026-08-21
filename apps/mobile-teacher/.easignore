@@ -1,0 +1,22 @@
+# Ignore dependencies
+node_modules/
+
+# Ignore native build directories
+android/
+ios/
+
+# Ignore Expo files
+.expo/
+dist/
+web-build/
+
+# Ignore local config
+.env*.local
+
+# Ignore other files
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.pem

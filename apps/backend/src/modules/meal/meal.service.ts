@@ -1,7 +1,7 @@
 import prisma from "../../database/prisma";
 import {validateGeofence,} from "../../common/utils/geofence";
 import { mlQueue } from "../../queues/ml.queue";
-import { uploadToS3 } from "../../common/utils/s3Upload";
+import { saveLocalFile, formatDateFolder } from "../../common/utils/localStorage";
 
 export const createMealSessionService = async (
   userId:string,
@@ -33,6 +33,9 @@ export const createMealSessionService = async (
   if (!teacherSection) {throw new Error("Section not assigned");}
 
   const school = teacherSection.section.standard.school;
+  const standard = teacherSection.section.standard;
+  const section = teacherSection.section;
+
   const geoResult =validateGeofence(body.latitude,body.longitude,school);
 
   await prisma.geofenceValidation.create({
@@ -54,18 +57,23 @@ export const createMealSessionService = async (
     throw new Error("Outside school premises");
   }
 
+  const sessionDate = new Date();
   const mealSession = await prisma.mealSession.create({
       data:{
         sectionId:body.sectionId,
         teacherUserId:userId,
-        date:new Date(),
+        date:sessionDate,
         totalDetected:0,
         status:"PENDING",
       },
     });
 
+  const dateFolder = formatDateFolder(sessionDate);
+  const sanitizedSectionName = section.name.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const relativeDir = `schools/${school.id}/class_${standard.value}/section_${sanitizedSectionName}/meals/${dateFolder}`;
+
   for (const file of files) {
-    const imageUrl =await uploadToS3(file,"meals");
+    const imageUrl = await saveLocalFile(file, relativeDir);
 
     await prisma.mealImage.create({
       data:{

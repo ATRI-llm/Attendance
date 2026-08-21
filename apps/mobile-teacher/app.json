@@ -39,10 +39,26 @@
         }
       ],
       "expo-secure-store",
-      "expo-asset"
+      "expo-asset",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "ndk": {
+              "abiFilters": ["arm64-v8a"]
+            }
+          }
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "b8df8d2a-ab41-41e4-a376-413bf2a4b82a"
+      }
     }
   }
 }

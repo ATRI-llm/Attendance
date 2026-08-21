@@ -82,30 +82,6 @@ export const registerModelAssetService = async (
   };
 };
 
-import { GetObjectCommand } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { s3 } from "../../config/s3";
-
-const getPresignedUrl = async (rawUrl: string) => {
-  // rawUrl is like https://uitb-school-ai-prod.s3.ap-south-1.amazonaws.com/models/shared/Rec_Mobile_Net.onnx
-  try {
-    const bucket = process.env.AWS_BUCKET_NAME || "uitb-school-ai-prod";
-    // Extract everything after .amazonaws.com/
-    const keyMatch = rawUrl.match(/\.amazonaws\.com\/(.+)$/);
-    if (!keyMatch || !keyMatch[1]) return rawUrl;
-    
-    const command = new GetObjectCommand({
-      Bucket: bucket,
-      Key: keyMatch[1],
-    });
-    // 1 hour expiration
-    return await getSignedUrl(s3, command, { expiresIn: 3600 });
-  } catch (err) {
-    console.error("[ModelSync] Failed to generate presigned URL:", err);
-    return rawUrl;
-  }
-};
-
 export const getActiveModelAssetService = async (
   userId: string,
   sectionId: string
@@ -135,8 +111,8 @@ export const getActiveModelAssetService = async (
     id: asset.id,
     backboneVersion: asset.backboneVersion,
     classifierVersion: asset.classifierVersion,
-    backboneUrl: await getPresignedUrl(asset.backboneUrl),
-    classifierUrl: await getPresignedUrl(asset.classifierUrl),
+    backboneUrl: asset.backboneUrl,
+    classifierUrl: asset.classifierUrl,
     trainedAt: asset.trainedAt,
     description: asset.description,
   };

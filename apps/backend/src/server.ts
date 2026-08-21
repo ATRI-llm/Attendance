@@ -17,23 +17,39 @@ import fs from "fs";
 
 // Initialize base models for local development/first-time setup
 const initBaseModels = () => {
-  if (process.env.USE_LOCAL_UPLOAD !== "true") return;
-
+  const uploadsModelsSharedDir = path.join(__dirname, "../uploads/models/shared");
   const uploadsModelsDir = path.join(__dirname, "../uploads/models");
-  if (!fs.existsSync(uploadsModelsDir)) {
-    fs.mkdirSync(uploadsModelsDir, { recursive: true });
-  }
+  
+  fs.mkdirSync(uploadsModelsSharedDir, { recursive: true });
 
   const baseModels = ["Det_Retina_Net.onnx", "Rec_Mobile_Net.onnx"];
-  const sourceDir = path.join(__dirname, "../../models");
+  const candidateDirs = [
+    path.join(__dirname, "../../ml-worker/src/ml/attendance_system/models"),
+    path.join(__dirname, "../models"),
+    path.join(__dirname, "../../models"),
+  ];
 
   baseModels.forEach((modelName) => {
-    const sourcePath = path.join(sourceDir, modelName);
-    const destPath = path.join(uploadsModelsDir, modelName);
-    
-    if (fs.existsSync(sourcePath) && !fs.existsSync(destPath)) {
-      console.log(`[Init] Copying base model ${modelName} to uploads folder...`);
-      fs.copyFileSync(sourcePath, destPath);
+    let sourcePath: string | null = null;
+    for (const dir of candidateDirs) {
+      const p = path.join(dir, modelName);
+      if (fs.existsSync(p)) {
+        sourcePath = p;
+        break;
+      }
+    }
+
+    if (sourcePath) {
+      const destShared = path.join(uploadsModelsSharedDir, modelName);
+      const destRoot = path.join(uploadsModelsDir, modelName);
+
+      if (!fs.existsSync(destShared)) {
+        console.log(`[Init] Copying base model ${modelName} to uploads/models/shared/...`);
+        fs.copyFileSync(sourcePath, destShared);
+      }
+      if (!fs.existsSync(destRoot)) {
+        fs.copyFileSync(sourcePath, destRoot);
+      }
     }
   });
 };

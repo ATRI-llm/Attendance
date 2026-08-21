@@ -1,10 +1,6 @@
 import torch
 import torch.nn as nn
 
-from src.config import (
-    get_num_students
-)
-
 
 class AttendanceClassifier(nn.Module):
     """
@@ -27,15 +23,9 @@ class AttendanceClassifier(nn.Module):
 
     def __init__(
         self,
-        num_classes=None
+        num_classes
     ):
         super().__init__()
-
-        if num_classes is None:
-
-            num_classes = (
-                get_num_students()
-            )
 
         self.num_classes = (
             num_classes
@@ -73,17 +63,16 @@ class AttendanceClassifier(nn.Module):
         return self.num_classes
 
 
-def create_model():
+def create_model(num_classes):
     """
     Factory function.
 
-    Output dimension is determined
-    automatically from student folders.
-    """
+    Args:
+        num_classes: Number of students/output classes
 
-    num_classes = (
-        get_num_students()
-    )
+    Returns:
+        AttendanceClassifier instance
+    """
 
     return AttendanceClassifier(
         num_classes=num_classes

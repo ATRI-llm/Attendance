@@ -1,49 +1,5 @@
-import fs from "fs";
-import path from "path";
-import { PutObjectCommand } from "@aws-sdk/client-s3";
-import { s3 } from "../../config/s3";
 import prisma from "../../database/prisma";
-
-const useLocalUpload = () => process.env.USE_LOCAL_UPLOAD === "true";
-
-// ─────────────────────────────────────────────────────────────────
-// uploadBase64ToS3
-// Converts a base64-encoded image string to a Buffer and uploads
-// it to S3 (or local storage in dev mode).
-// Used to upload face crops sent from the mobile app during sync.
-// ─────────────────────────────────────────────────────────────────
-export const uploadBase64ToS3 = async (
-  base64: string,
-  folder: string,
-  filename: string
-): Promise<string> => {
-  // Strip data URI prefix if present (e.g. "data:image/jpeg;base64,...")
-  const stripped = base64.replace(/^data:image\/\w+;base64,/, "");
-  const buffer = Buffer.from(stripped, "base64");
-
-  if (useLocalUpload()) {
-    const uploadRoot = path.join(__dirname, "../../../uploads", folder);
-    fs.mkdirSync(uploadRoot, { recursive: true });
-    const fname = `${Date.now()}-${filename}`;
-    fs.writeFileSync(path.join(uploadRoot, fname), buffer);
-    const base =
-      process.env.LOCAL_UPLOAD_BASE_URL ||
-      `http://127.0.0.1:${process.env.PORT || 5000}`;
-    return `${base}/uploads/${folder}/${fname}`;
-  }
-
-  const key = `${folder}/${Date.now()}-${filename}`;
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: process.env.AWS_BUCKET_NAME,
-      Key: key,
-      Body: buffer,
-      ContentType: "image/jpeg",
-    })
-  );
-
-  return `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
-};
+import { saveLocalBuffer } from "../../common/utils/localStorage";
 
 // ─────────────────────────────────────────────────────────────────
 // offlineSyncService
@@ -54,12 +10,9 @@ export const uploadBase64ToS3 = async (
 //  2. Create AttendanceSession (marked as offline sync)
 //  3. For each record:
 //     a. Create AttendanceRecord
-//     b. If crop image is present: upload to S3, create AttendanceCropImage
-//        (crop + 512-dim embedding = training data for next NN cycle)
+//     b. If crop image is present: save locally in crop_attendance folder,
+//        create AttendanceCropImage (crop + 512-dim embedding)
 //  4. Mark session as PROCESSED (no ML queue needed — already done on device)
-//
-// Note: The 40-dim classifier output is never sent or stored.
-// Only the 512-dim MobileFaceNet embedding is stored for retraining.
 // ─────────────────────────────────────────────────────────────────
 export interface OfflineSyncRecord {
   studentId: string;
@@ -90,11 +43,28 @@ export const offlineSyncService = async (
       teacher: { userId },
       sectionId: payload.sectionId,
     },
+    include: {
+      section: {
+        include: {
+          standard: {
+            include: {
+              school: true,
+            },
+          },
+        },
+      },
+    },
   });
 
   if (!teacherSection) {
     throw new Error("Section not assigned to this teacher");
   }
+
+  const school = teacherSection.section.standard.school;
+  const standard = teacherSection.section.standard;
+  const section = teacherSection.section;
+  const sanitizedSectionName = section.name.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const dateFolder = payload.date;
 
   // 2. Upsert AttendanceSession (offline sync)
   // This merges all offline syncs for the same day into a single backend session
@@ -163,12 +133,14 @@ export const offlineSyncService = async (
     // 3b. If there's a crop image + embedding, store as training data
     if (rec.cropImageBase64 && rec.embeddingVector) {
       try {
-        // Upload the crop photo to S3
-        const cropUrl = await uploadBase64ToS3(
-          rec.cropImageBase64,
-          "attendance-crops",
-          `session-${session.id}-roll-${rec.rollNumber}.jpg`
-        );
+        const stripped = rec.cropImageBase64.replace(/^data:image\/\w+;base64,/, "");
+        const buffer = Buffer.from(stripped, "base64");
+
+        const cropSubdir = targetStudentId ? targetStudentId : "unknown";
+        const relativeDir = `schools/${school.id}/class_${standard.value}/section_${sanitizedSectionName}/crop_attendance/${cropSubdir}/${dateFolder}`;
+        const fname = `session-${session.id}-roll-${rec.rollNumber}.jpg`;
+
+        const cropUrl = await saveLocalBuffer(buffer, relativeDir, fname);
 
         // Also update the AttendanceRecord with the crop URL + embedding
         await prisma.attendanceRecord.update({
@@ -196,7 +168,7 @@ export const offlineSyncService = async (
       } catch (err: any) {
         // Non-fatal — attendance record already saved, just skip crop
         console.error(
-          `Failed to upload crop for roll ${rec.rollNumber}:`,
+          `Failed to save crop for roll ${rec.rollNumber}:`,
           err.message
         );
       }
@@ -215,3 +187,4 @@ export const offlineSyncService = async (
   console.log(`Offline sync complete:`, stats);
   return stats;
 };
+

@@ -1,7 +1,7 @@
 import prisma from "../../database/prisma";
 import { validateGeofence }from "../../common/utils/geofence";
 import { mlQueue }from "../../queues/ml.queue";
-import { uploadToS3 } from "../../common/utils/s3Upload";
+import { saveLocalFile, formatDateFolder } from "../../common/utils/localStorage";
 
 export const createAttendanceService =async (userId: string,body: any,files: Express.Multer.File[]) => {
     const teacherSection = await prisma.teacherSection.findFirst({
@@ -31,6 +31,9 @@ export const createAttendanceService =async (userId: string,body: any,files: Exp
     }
 
     const school = teacherSection.section.standard.school;
+    const standard = teacherSection.section.standard;
+    const section = teacherSection.section;
+
     const geoResult =validateGeofence(body.latitude,body.longitude,school);
 
     await prisma.geofenceValidation.create({
@@ -49,18 +52,23 @@ export const createAttendanceService =async (userId: string,body: any,files: Exp
       throw new Error("Outside school premises");
     }
 
+    const sessionDate = new Date();
     const attendanceSession =
       await prisma.attendanceSession.create({
         data: {
           sectionId: body.sectionId,
           teacherUserId:userId,
-          date: new Date(),
+          date: sessionDate,
           status: "PENDING",
         },
       });
 
+    const dateFolder = formatDateFolder(sessionDate);
+    const sanitizedSectionName = section.name.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const relativeDir = `schools/${school.id}/class_${standard.value}/section_${sanitizedSectionName}/attendance/${dateFolder}`;
+
     for (const file of files) {
-      const imageUrl =await uploadToS3(file,"attendance");
+      const imageUrl = await saveLocalFile(file, relativeDir);
 
       await prisma.attendanceImage.create({
         data: {

@@ -7,7 +7,7 @@ Pipeline:
   1. Pull embeddings from DB (StudentFaceEmbedding + AttendanceCropImage)
   2. Train the NN classifier (512 -> 128 -> N_students)
   3. Export to ONNX
-  4. Upload both model files to S3
+  4. Save model files locally in section directory hierarchy
   5. Register as the active ModelAsset in the backend database
 
 Usage:
@@ -16,10 +16,6 @@ Usage:
 
 Environment variables required:
   DATABASE_URL          PostgreSQL connection string
-  AWS_ACCESS_KEY_ID
-  AWS_SECRET_ACCESS_KEY
-  AWS_REGION
-  AWS_BUCKET_NAME
   BACKEND_URL           e.g. http://localhost:5000/api
   BACKEND_TOKEN         Admin JWT token to call /api/model-sync/register-asset
 """
@@ -49,35 +45,60 @@ from src.classifier.train import ClassifierTrainer
 from src.classifier.export_onnx import ONNXExporter
 
 
+import shutil
+import psycopg2
+from src.dataset_builder.db_dataset_builder import _get_conn
+
+
 # ============================================================
-# S3 UPLOAD
+# LOCAL MODEL STORAGE & HIERARCHY
 # ============================================================
 
-def upload_to_s3(local_path: Path, s3_key: str, content_type: str = "application/octet-stream") -> str:
-    """Upload a file to S3 and return its public URL."""
-    import boto3
+def _get_uploads_dir() -> Path:
+    """Resolve the root uploads folder across local dev and Docker environments."""
+    env_dir = os.environ.get("UPLOADS_DIR")
+    if env_dir:
+        p = Path(env_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
 
-    bucket = os.environ["AWS_BUCKET_NAME"]
-    region = os.environ.get("AWS_REGION", "ap-south-1")
+    docker_uploads = Path("/app/uploads")
+    if docker_uploads.exists():
+        return docker_uploads
 
-    s3 = boto3.client(
-        "s3",
-        region_name=region,
-        aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
-    )
+    backend_uploads = Path(__file__).resolve().parents[4] / "backend" / "uploads"
+    backend_uploads.mkdir(parents=True, exist_ok=True)
+    return backend_uploads
 
-    print(f"  Uploading {local_path.name} → s3://{bucket}/{s3_key}")
-    s3.upload_file(
-        str(local_path),
-        bucket,
-        s3_key,
-        ExtraArgs={"ContentType": content_type},
-    )
 
-    url = f"https://{bucket}.s3.{region}.amazonaws.com/{s3_key}"
-    print(f"  Uploaded: {url}")
-    return url
+def _fetch_section_hierarchy(section_id: str) -> dict:
+    """Fetch school ID, class/standard value, and section name from the DB."""
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT s.id as section_id, s.name as section_name,
+                   st.value as class_value, sc.id as school_id
+            FROM "Section" s
+            JOIN "Standard" st ON s."standardId" = st.id
+            JOIN "School" sc ON st."schoolId" = sc.id
+            WHERE s.id = %s
+            """,
+            (section_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Section {section_id} not found in database.")
+        return {
+            "section_id": row[0],
+            "section_name": row[1],
+            "class_value": row[2],
+            "school_id": row[3],
+        }
+    finally:
+        cur.close()
+        conn.close()
 
 
 # ============================================================
@@ -149,7 +170,6 @@ def run_pipeline(section_id: str, version_tag: str):
     timestamp = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
 
     unique_short = uuid.uuid4().hex[:8]
-    # Format: v1-a1b2c3d4
     clean_version = version_tag.lower() if version_tag.lower().startswith('v') else f"v{version_tag}"
     classifier_version = f"{clean_version}-{unique_short}"
     backbone_version = "MobileFaceNet-v1"  # backbone never changes
@@ -160,6 +180,12 @@ def run_pipeline(section_id: str, version_tag: str):
     print(f"Section ID         : {section_id}")
     print(f"Classifier Version : {classifier_version}")
     print(f"Backbone Version   : {backbone_version}")
+
+    # Fetch section hierarchy for structured local storage
+    hierarchy = _fetch_section_hierarchy(section_id)
+    school_id = hierarchy["school_id"]
+    class_val = hierarchy["class_value"]
+    sanitized_sec = hierarchy["section_name"].replace(" ", "_").replace("/", "_")
 
     # ── Step 1: Build dataset from DB ───────────────────────────
     print("\n[1/5] Building dataset from database...")
@@ -183,24 +209,46 @@ def run_pipeline(section_id: str, version_tag: str):
     exporter = ONNXExporter()
     exporter.export()
 
-    # ── Step 4: Upload to S3 ─────────────────────────────────────
-    print("\n[4/5] Uploading models to S3...")
-    s3_prefix = f"models/{section_id}/{classifier_version}"
-
-    classifier_url = upload_to_s3(
-        CLASSIFIER_ONNX_PATH,
-        f"{s3_prefix}/attendance_classifier.onnx",
+    # ── Step 4: Save models locally in section folder ────────────
+    print("\n[4/5] Saving model files locally in folder hierarchy...")
+    uploads_dir = _get_uploads_dir()
+    
+    relative_model_dir = (
+        f"schools/{school_id}/class_{class_val}/section_{sanitized_sec}/models/{classifier_version}"
     )
+    target_model_dir = uploads_dir / relative_model_dir
+    target_model_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy classifier ONNX and label maps
+    dest_clf_onnx = target_model_dir / "attendance_classifier.onnx"
+    shutil.copyfile(CLASSIFIER_ONNX_PATH, dest_clf_onnx)
 
     label_map_path = ARTIFACT_DIR / "label_map.json"
     reverse_map_path = ARTIFACT_DIR / "reverse_label_map.json"
+    shutil.copyfile(label_map_path, target_model_dir / "label_map.json")
+    shutil.copyfile(reverse_map_path, target_model_dir / "reverse_label_map.json")
 
-    upload_to_s3(label_map_path, f"{s3_prefix}/label_map.json", "application/json")
-    upload_to_s3(reverse_map_path, f"{s3_prefix}/reverse_label_map.json", "application/json")
+    # Ensure shared backbone model is in uploads/models/shared/
+    shared_models_dir = uploads_dir / "models" / "shared"
+    shared_models_dir.mkdir(parents=True, exist_ok=True)
+    shared_backbone_dest = shared_models_dir / "Rec_Mobile_Net.onnx"
+    if not shared_backbone_dest.exists() and REC_MODEL_PATH.exists():
+        shutil.copyfile(REC_MODEL_PATH, shared_backbone_dest)
 
-    # Backbone is shared — upload once to a stable key
-    backbone_s3_key = "models/shared/Rec_Mobile_Net.onnx"
-    backbone_url = upload_to_s3(REC_MODEL_PATH, backbone_s3_key)
+    # Build local URLs
+    backend_base = (
+        os.environ.get("LOCAL_UPLOAD_BASE_URL")
+        or os.environ.get("BACKEND_BASE_URL", "http://localhost:5000")
+    )
+    if backend_base.endswith("/api"):
+        backend_base = backend_base[:-4]
+
+    classifier_url = f"{backend_base}/uploads/{relative_model_dir}/attendance_classifier.onnx"
+    backbone_url = f"{backend_base}/uploads/models/shared/Rec_Mobile_Net.onnx"
+
+    print(f"  Classifier saved to: {dest_clf_onnx}")
+    print(f"  Classifier URL     : {classifier_url}")
+    print(f"  Backbone URL       : {backbone_url}")
 
     # ── Step 5: Register ModelAsset in backend ───────────────────
     print("\n[5/5] Registering model asset in backend...")
@@ -239,6 +287,7 @@ def run_pipeline(section_id: str, version_tag: str):
         "numClasses": num_classes,
         "numSamples": int(len(labels)),
     }
+
 
 
 # ============================================================

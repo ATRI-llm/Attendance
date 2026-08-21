@@ -68,12 +68,8 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      AWS_REGION: ${AWS_REGION}
-      AWS_BUCKET_NAME: ${AWS_BUCKET_NAME}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      USE_LOCAL_UPLOAD: ${USE_LOCAL_UPLOAD:-false}
-      LOCAL_UPLOAD_BASE_URL: ${LOCAL_UPLOAD_BASE_URL:-http://backend:5000}
+      USE_LOCAL_UPLOAD: "true"
+      LOCAL_UPLOAD_BASE_URL: ${LOCAL_UPLOAD_BASE_URL:-http://192.168.31.11:5000}
       BACKEND_BASE_URL: http://backend:5000
     ports:
       - "5000:5000"
@@ -103,16 +99,14 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:Kkr%4013245@postgres:5432/${POSTGRES_DB:-school_db}
-      AWS_REGION: ${AWS_REGION}
-      AWS_BUCKET_NAME: ${AWS_BUCKET_NAME}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       BACKEND_URL: http://backend:5000/api
+      LOCAL_UPLOAD_BASE_URL: http://backend:5000
       BACKEND_TOKEN: ${BACKEND_TOKEN:-}
+      UPLOADS_DIR: /app/uploads
     ports:
       - "8000:8000"
     volumes:
-      # Mount ONNX model files so they persist between restarts
+      - backend_uploads:/app/uploads
       - ml_models:/app/attendance_system/models
       - ml_artifacts:/app/attendance_system/artifacts
     depends_on:
@@ -143,10 +137,10 @@ services:
       BACKEND_URL: http://backend:5000/api
       ML_SERVICE_URL: http://ml-service:8000
       BACKEND_TOKEN: ${BACKEND_TOKEN:-}
-      AWS_REGION: ${AWS_REGION}
-      AWS_BUCKET_NAME: ${AWS_BUCKET_NAME}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      LOCAL_UPLOAD_BASE_URL: http://backend:5000
+      UPLOADS_DIR: /app/uploads
+    volumes:
+      - backend_uploads:/app/uploads
     depends_on:
       redis:
         condition: service_healthy
@@ -163,6 +157,8 @@ services:
     build:
       context: ./apps/web-admin
       dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=http://backend:5000/api
     container_name: school_web_admin
     restart: unless-stopped
     environment:
