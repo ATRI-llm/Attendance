@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "extra": {
+      "eas": {
+        "projectId": "6e23e10a-fa0e-4e2f-9c6f-5a112a85b8dd"
+      }
+    },
+    "android": {
+      "package": "com.ravi_saki.schoolaimonitoringsystem"
+    }
+  }
+}
