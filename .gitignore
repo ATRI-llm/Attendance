@@ -17,3 +17,4 @@ __pycache__/
 *.env
 .venv
 Dataset/
+SCHOOL_AI_MONITORING_SYSTEM_REFERENCE.md

@@ -1,18 +1,18 @@
-#  School AI Monitoring System — Full Stack Docker Compose
+# School AI Monitoring System — Full Stack Docker Compose
 #
-#  Services:
-#    postgres    — PostgreSQL 15 (lightweight alpine)
-#    redis       — Redis 7 (lightweight alpine)
-#    backend     — Node.js Express API (port 5000)
-#    ml-worker   — Node.js BullMQ consumer (no port)
-#    ml-service  — Python FastAPI ML server (port 8000)
-#    web-admin   — Next.js admin dashboard (port 3000)
+# Services:
+#   postgres    — PostgreSQL 15 (lightweight alpine)
+#   redis       — Redis 7 (lightweight alpine)
+#   backend     — Node.js Express API (port 5000)
+#   ml-worker   — Node.js BullMQ consumer (no port)
+#   ml-service  — Python FastAPI ML server (port 8000)
+#   web-admin   — Next.js admin dashboard (port 3000)
 #
-#  Usage:
-#    cp .env.example .env    # fill in your values
-#    docker compose up -d    # start all services
-#    docker compose logs -f  # tail logs
-#    docker compose down     # stop everything
+# Usage:
+#   cp .env.example .env    # fill in your values
+#   docker compose up -d    # start all services
+#   docker compose logs -f  # tail logs
+#   docker compose down     # stop everything
 
 services:
 
@@ -91,7 +91,7 @@ services:
 
   ml-service:
     build:
-      context: . # root context — needed to access apps/ml-worker/src/ml/
+      context: .
       dockerfile: apps/ml-service/Dockerfile
     container_name: school_ml_service
     restart: unless-stopped
@@ -115,13 +115,13 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 40s # extra time for ONNX model loading
+      start_period: 40s
 
   # ── Node.js ML Worker (BullMQ consumer) ─────────────────────────
 
   ml-worker:
     build:
-      context: . # root context — needed to access prisma schema from backend
+      context: .
       dockerfile: apps/ml-worker/Dockerfile
     container_name: school_ml_worker
     restart: unless-stopped
@@ -153,6 +153,8 @@ services:
     build:
       context: ./apps/web-admin
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://backend:5000/api
     container_name: school_web_admin
     restart: unless-stopped
     environment:
@@ -179,7 +181,7 @@ volumes:
     driver: local
   redis_data:
     driver: local
-  
+
 # ── Networks ─────────────────────────────────────────────────────
 
 networks:
