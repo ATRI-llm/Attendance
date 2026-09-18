@@ -1,4 +1,5 @@
 import prisma from "../../database/prisma";
+import { mlQueue } from "../../queues/ml.queue";
 
 export interface RegisterModelAssetInput {
   sectionId: string;
@@ -6,16 +7,101 @@ export interface RegisterModelAssetInput {
   classifierVersion: string;
   backboneUrl: string;
   classifierUrl: string;
-  labelMap?: Record<string, number>;  // roll_str -> class_id (stored as description audit)
+  labelMap?: Record<string, number>;
   description?: string;
 }
 
-// ─────────────────────────────────────────────────────────────────
-// registerModelAssetService
-// Called by the Python training pipeline (via POST /model-sync/register-asset)
-// after a new classifier ONNX is uploaded to S3.
-// Marks the new model as active and deactivates all previous models for this section.
-// ─────────────────────────────────────────────────────────────────
+/**
+ * Convert a local model storage key or backend model URL
+ * into a URL served by the backend.
+ *
+ * Supported storage keys:
+ *
+ *   models/shared/Rec_Mobile_Net.onnx
+ *   models/shared/Det_Retina_Net.onnx
+ *   models/sections/<sectionId>/<version>/model.onnx
+ *
+ * Physical files live under:
+ *
+ *   <project-root>/storage/models/
+ *
+ * and are exposed by the backend at:
+ *
+ *   /models/...
+ */
+const getLocalModelUrl = (value: string): string => {
+  if (!value) {
+    return value;
+  }
+
+  const baseUrl =
+    process.env.BACKEND_BASE_URL ||
+    process.env.LOCAL_UPLOAD_BASE_URL ||
+    `http://127.0.0.1:${process.env.PORT || 5000}`;
+
+  const cleanBaseUrl = baseUrl.replace(/\/+$/, "");
+
+  /*
+   * Already a backend model URL.
+   */
+  if (value.includes("/models/")) {
+    const modelsIndex = value.indexOf("/models/");
+    const key = value
+      .substring(modelsIndex + 1)
+      .replace(/^\/+/, "");
+
+    return `${cleanBaseUrl}/${key}`;
+  }
+
+  /*
+   * Already a backend upload URL from the local-storage
+   * implementation.
+   */
+  if (value.includes("/uploads/models/")) {
+    const modelsIndex = value.indexOf("/uploads/models/");
+    const key = value
+      .substring(modelsIndex + "/uploads/".length)
+      .replace(/^\/+/, "");
+
+    return `${cleanBaseUrl}/${key}`;
+  }
+
+  /*
+   * Local storage key.
+   *
+   * Example:
+   *
+   *   models/shared/Rec_Mobile_Net.onnx
+   */
+  if (
+    !value.startsWith("http://") &&
+    !value.startsWith("https://") &&
+    !value.startsWith("/")
+  ) {
+    const normalized = value
+      .replace(/\\/g, "/")
+      .replace(/^\/+/, "");
+
+    if (normalized.startsWith("models/")) {
+      return `${cleanBaseUrl}/${normalized}`;
+    }
+
+    return `${cleanBaseUrl}/models/${normalized}`;
+  }
+
+  /*
+   * Absolute URLs and root-relative paths are returned unchanged.
+   */
+  return value;
+};
+
+/**
+ * Register a newly trained model.
+ *
+ * The training pipeline provides local model storage keys.
+ * The new model becomes active for the section and all
+ * previous active models are deactivated.
+ */
 export const registerModelAssetService = async (
   input: RegisterModelAssetInput
 ) => {
@@ -29,19 +115,35 @@ export const registerModelAssetService = async (
     description,
   } = input;
 
-  // Verify section exists
-  const section = await prisma.section.findUnique({ where: { id: sectionId } });
+  /*
+   * Verify section exists.
+   */
+  const section = await prisma.section.findUnique({
+    where: {
+      id: sectionId,
+    },
+  });
+
   if (!section) {
     throw new Error(`Section not found: ${sectionId}`);
   }
 
-  // Deactivate all existing models for this section
+  /*
+   * Deactivate existing active models.
+   */
   await prisma.modelAsset.updateMany({
-    where: { sectionId, isActive: true },
-    data: { isActive: false },
+    where: {
+      sectionId,
+      isActive: true,
+    },
+    data: {
+      isActive: false,
+    },
   });
 
-  // Build description string including label map audit
+  /*
+   * Keep label-map audit information.
+   */
   const auditDescription = [
     description ?? "",
     labelMap
@@ -51,14 +153,16 @@ export const registerModelAssetService = async (
     .filter(Boolean)
     .join(" | ");
 
-  // Create new active model asset
+  /*
+   * Store local model references.
+   */
   const asset = await prisma.modelAsset.create({
     data: {
       sectionId,
       backboneVersion,
       classifierVersion,
-      backboneUrl,
-      classifierUrl,
+      backboneUrl: getLocalModelUrl(backboneUrl),
+      classifierUrl: getLocalModelUrl(classifierUrl),
       isActive: true,
       trainedAt: new Date(),
       description: auditDescription || undefined,
@@ -75,45 +179,32 @@ export const registerModelAssetService = async (
     sectionId: asset.sectionId,
     backboneVersion: asset.backboneVersion,
     classifierVersion: asset.classifierVersion,
-    backboneUrl: asset.backboneUrl,
-    classifierUrl: asset.classifierUrl,
+    backboneUrl: getLocalModelUrl(asset.backboneUrl),
+    classifierUrl: getLocalModelUrl(asset.classifierUrl),
     isActive: asset.isActive,
     trainedAt: asset.trainedAt,
+    description: asset.description,
   };
 };
 
-import { GetObjectCommand } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { s3 } from "../../config/s3";
-
-const getPresignedUrl = async (rawUrl: string) => {
-  // rawUrl is like https://uitb-school-ai-prod.s3.ap-south-1.amazonaws.com/models/shared/Rec_Mobile_Net.onnx
-  try {
-    const bucket = process.env.AWS_BUCKET_NAME || "uitb-school-ai-prod";
-    // Extract everything after .amazonaws.com/
-    const keyMatch = rawUrl.match(/\.amazonaws\.com\/(.+)$/);
-    if (!keyMatch || !keyMatch[1]) return rawUrl;
-    
-    const command = new GetObjectCommand({
-      Bucket: bucket,
-      Key: keyMatch[1],
-    });
-    // 1 hour expiration
-    return await getSignedUrl(s3, command, { expiresIn: 3600 });
-  } catch (err) {
-    console.error("[ModelSync] Failed to generate presigned URL:", err);
-    return rawUrl;
-  }
-};
-
+/**
+ * Return the currently active model for a section.
+ *
+ * The teacher app receives backend URLs pointing to
+ * locally stored model files.
+ */
 export const getActiveModelAssetService = async (
   userId: string,
   sectionId: string
 ) => {
-  // Verify the teacher is assigned to this section
+  /*
+   * Verify the teacher is assigned to this section.
+   */
   const teacherSection = await prisma.teacherSection.findFirst({
     where: {
-      teacher: { userId },
+      teacher: {
+        userId,
+      },
       sectionId,
     },
   });
@@ -122,43 +213,53 @@ export const getActiveModelAssetService = async (
     throw new Error("Section not assigned to this teacher");
   }
 
+  /*
+   * Find active model.
+   */
   const asset = await prisma.modelAsset.findFirst({
-    where: { sectionId, isActive: true },
-    orderBy: { createdAt: "desc" },
+    where: {
+      sectionId,
+      isActive: true,
+    },
+    orderBy: {
+      createdAt: "desc",
+    },
   });
 
   if (!asset) {
-    return null; // No model registered yet — app should warn teacher
+    return null;
   }
 
   return {
     id: asset.id,
     backboneVersion: asset.backboneVersion,
     classifierVersion: asset.classifierVersion,
-    backboneUrl: await getPresignedUrl(asset.backboneUrl),
-    classifierUrl: await getPresignedUrl(asset.classifierUrl),
+    backboneUrl: getLocalModelUrl(asset.backboneUrl),
+    classifierUrl: getLocalModelUrl(asset.classifierUrl),
     trainedAt: asset.trainedAt,
     description: asset.description,
   };
 };
 
-// ─────────────────────────────────────────────────────────────────
-// getSectionEmbeddingsService
-// Returns all students in the section with their stored 512-dim
-// MobileFaceNet embedding vectors. Teacher app syncs these locally
-// (SQLite) so the on-device NN classifier can run offline.
-//
-// Each student may have multiple embeddings (one per onboarding
-// photo). The app receives all of them.
-// ─────────────────────────────────────────────────────────────────
+/**
+ * Return all students and their stored face embeddings
+ * for offline teacher-side inference.
+ *
+ * Each student may have multiple embeddings, one per
+ * onboarding photo and/or verified attendance crop.
+ */
 export const getSectionEmbeddingsService = async (
   userId: string,
   sectionId: string
 ) => {
-  // Verify the teacher is assigned to this section
+  /*
+   * Verify teacher assignment.
+   */
   const teacherSection = await prisma.teacherSection.findFirst({
     where: {
-      teacher: { userId },
+      teacher: {
+        userId,
+      },
       sectionId,
     },
   });
@@ -167,8 +268,13 @@ export const getSectionEmbeddingsService = async (
     throw new Error("Section not assigned to this teacher");
   }
 
+  /*
+   * Get students and all face embeddings.
+   */
   const students = await prisma.student.findMany({
-    where: { sectionId },
+    where: {
+      sectionId,
+    },
     include: {
       user: {
         select: {
@@ -177,52 +283,78 @@ export const getSectionEmbeddingsService = async (
         },
       },
       faceEmbeddings: {
-        orderBy: { createdAt: "desc" },
+        orderBy: {
+          createdAt: "desc",
+        },
       },
     },
-    orderBy: { rollNumber: "asc" },
+    orderBy: {
+      rollNumber: "asc",
+    },
   });
 
-  // Only include students who have at least one embedding (onboarding done)
+  /*
+   * Only students with at least one embedding
+   * are ready for offline inference.
+   */
   const studentsWithEmbeddings = students.filter(
-    (s) => s.faceEmbeddings.length > 0
+    (student) => student.faceEmbeddings.length > 0
   );
 
   return {
     sectionId,
     totalStudents: students.length,
     readyStudents: studentsWithEmbeddings.length,
-    students: studentsWithEmbeddings.map((s) => ({
-      studentId: s.id,
-      rollNumber: s.rollNumber,
-      firstName: s.user.firstName,
-      lastName: s.user.lastName,
-      faceStatus: s.faceStatus,
-      // All 512-dim embedding vectors for this student.
-      // App stores these locally and the on-device classifier
-      // uses them for inference.
-      embeddingVectors: s.faceEmbeddings.map((e) => ({
-        id: e.id,
-        embedding: e.embedding, // 512-dim array (Json in DB)
-        modelVersion: e.modelVersion,
-        createdAt: e.createdAt,
-      })),
+
+    students: studentsWithEmbeddings.map((student) => ({
+      studentId: student.id,
+      rollNumber: student.rollNumber,
+      firstName: student.user.firstName,
+      lastName: student.user.lastName,
+      faceStatus: student.faceStatus,
+
+      embeddingVectors: student.faceEmbeddings.map(
+        (embedding) => ({
+          id: embedding.id,
+          embedding: embedding.embedding,
+          modelVersion: embedding.modelVersion,
+          createdAt: embedding.createdAt,
+        })
+      ),
     })),
   };
 };
 
-import { mlQueue } from "../../queues/ml.queue";
-
-export const triggerTrainingService = async (sectionId: string, userId: string, role: string) => {
+/**
+ * Queue classifier training for a section.
+ */
+export const triggerTrainingService = async (
+  sectionId: string,
+  userId: string,
+  role: string
+) => {
+  /*
+   * Teachers can only train their own sections.
+   * Admins are allowed through the route authorization.
+   */
   if (role === "TEACHER") {
     const teacherSection = await prisma.teacherSection.findFirst({
-      where: { teacher: { userId }, sectionId },
+      where: {
+        teacher: {
+          userId,
+        },
+        sectionId,
+      },
     });
+
     if (!teacherSection) {
       throw new Error("Section not assigned to this teacher");
     }
   }
 
+  /*
+   * Create the ML processing job.
+   */
   const job = await prisma.mlProcessingJob.create({
     data: {
       jobType: "TRAIN_CLASSIFIER",
@@ -231,6 +363,9 @@ export const triggerTrainingService = async (sectionId: string, userId: string, 
     },
   });
 
+  /*
+   * Enqueue classifier training.
+   */
   await mlQueue.add("TRAIN_CLASSIFIER", {
     type: "TRAIN_CLASSIFIER",
     mlJobId: job.id,
@@ -238,5 +373,8 @@ export const triggerTrainingService = async (sectionId: string, userId: string, 
     version: "v1",
   });
 
-  return { jobId: job.id, message: "Classifier training job enqueued" };
+  return {
+    jobId: job.id,
+    message: "Classifier training job enqueued",
+  };
 };

@@ -1,0 +1,381 @@
+from pathlib import Path
+import os
+
+
+# ============================================================
+# PROJECT ROOT
+# ============================================================
+
+# attendance_system/
+ATTENDANCE_SYSTEM_ROOT = Path(__file__).resolve().parent.parent
+
+# school-ai-monitoring-system/
+PROJECT_ROOT = ATTENDANCE_SYSTEM_ROOT.parents[4]
+
+
+# ============================================================
+# SHARED STORAGE
+# ============================================================
+
+STORAGE_ROOT = Path(
+    os.environ.get(
+        "STORAGE_ROOT",
+        str(PROJECT_ROOT / "storage"),
+    )
+).resolve()
+
+
+# ============================================================
+# MODELS
+# ============================================================
+
+# Shared model storage:
+#
+# storage/
+#   models/
+#     shared/
+#     sections/
+#
+MODELS_DIR = STORAGE_ROOT / "models"
+
+SHARED_MODELS_DIR = MODELS_DIR / "shared"
+
+SECTION_MODELS_DIR = MODELS_DIR / "sections"
+
+
+DET_MODEL_PATH = (
+    SHARED_MODELS_DIR /
+    "Det_Retina_Net.onnx"
+)
+
+REC_MODEL_PATH = (
+    SHARED_MODELS_DIR /
+    "Rec_Mobile_Net.onnx"
+)
+
+# This remains the working classifier path used by
+# the existing training/export code.
+#
+# The training entrypoint copies the resulting ONNX file
+# into the section/version-specific shared storage directory.
+CLASSIFIER_ONNX_PATH = (
+    ATTENDANCE_SYSTEM_ROOT /
+    "models" /
+    "attendance_classifier.onnx"
+)
+
+
+# ============================================================
+# DATASET
+# ============================================================
+
+# Keep the existing ML-worker dataset location for now.
+# Dataset migration will be handled separately after the
+# onboarding/storage pipeline has been migrated.
+
+DATASET_DIR = (
+    ATTENDANCE_SYSTEM_ROOT /
+    "dataset"
+)
+
+STUDENTS_DIR = (
+    DATASET_DIR /
+    "students"
+)
+
+GROUP_PHOTOS_DIR = (
+    DATASET_DIR /
+    "group_photos"
+)
+
+
+# ============================================================
+# ARTIFACTS
+# ============================================================
+
+# Shared:
+#
+# storage/
+#   artifacts/
+#     sections/
+#
+ARTIFACT_DIR = (
+    STORAGE_ROOT /
+    "artifacts"
+)
+
+SECTION_ARTIFACTS_DIR = (
+    ARTIFACT_DIR /
+    "sections"
+)
+
+EMBEDDINGS_PATH = (
+    ARTIFACT_DIR /
+    "embeddings.npy"
+)
+
+TRAINING_METADATA_PATH = (
+    ARTIFACT_DIR /
+    "training_metadata.csv"
+)
+
+# Keep the existing classifier training output location
+# because ClassifierTrainer currently expects this path.
+CLASSIFIER_PTH_PATH = (
+    ARTIFACT_DIR /
+    "attendance_classifier.pth"
+)
+
+
+# ============================================================
+# OUTPUT
+# ============================================================
+
+OUTPUT_DIR = (
+    STORAGE_ROOT /
+    "output"
+)
+
+ATTENDANCE_CSV_PATH = (
+    OUTPUT_DIR /
+    "attendance.csv"
+)
+
+ATTENDANCE_FACES_DIR = (
+    OUTPUT_DIR /
+    "AttendanceFaces"
+)
+
+
+# ============================================================
+# DETECTOR SETTINGS
+# ============================================================
+
+DET_INPUT_SIZE = (
+    640,
+    640
+)
+
+SCORE_THRESHOLD = 0.50
+
+NMS_THRESHOLD = 0.40
+
+STRIDES = [
+    8,
+    16,
+    32
+]
+
+
+# ============================================================
+# FACE ALIGNMENT
+# ============================================================
+
+FACE_SIZE = 112
+
+ARCFACE_DST = [
+    [38.2946, 51.6963],
+    [73.5318, 51.5014],
+    [56.0252, 71.7366],
+    [41.5493, 92.3655],
+    [70.7299, 92.2041],
+]
+
+
+# ============================================================
+# TRAINING SETTINGS
+# ============================================================
+
+BATCH_SIZE = 32
+
+EPOCHS = 50
+
+LEARNING_RATE = 1e-3
+
+
+# ============================================================
+# ATTENDANCE SETTINGS
+# ============================================================
+
+CONFIDENCE_THRESHOLD = 0.45
+
+
+# ============================================================
+# IMAGE EXTENSIONS
+# ============================================================
+
+VALID_IMAGE_EXTENSIONS = [
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".bmp",
+]
+
+
+# ============================================================
+# CREATE REQUIRED DIRECTORIES
+# ============================================================
+
+REQUIRED_DIRS = [
+    STORAGE_ROOT,
+    MODELS_DIR,
+    SHARED_MODELS_DIR,
+    SECTION_MODELS_DIR,
+    ARTIFACT_DIR,
+    SECTION_ARTIFACTS_DIR,
+    OUTPUT_DIR,
+    ATTENDANCE_FACES_DIR,
+    DATASET_DIR,
+    STUDENTS_DIR,
+    GROUP_PHOTOS_DIR,
+]
+
+for directory in REQUIRED_DIRS:
+    directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+
+# ============================================================
+# STUDENT DISCOVERY
+# ============================================================
+
+def get_student_folders():
+    """
+    Returns all folders like:
+
+    student_01
+    student_02
+    student_03
+    """
+
+    if not STUDENTS_DIR.exists():
+        return []
+
+    folders = []
+
+    for item in os.listdir(
+        STUDENTS_DIR
+    ):
+
+        full_path = (
+            STUDENTS_DIR /
+            item
+        )
+
+        if (
+            full_path.is_dir()
+            and item.startswith("student_")
+        ):
+            folders.append(item)
+
+    folders.sort()
+
+    return folders
+
+
+def get_num_students():
+    """
+    Dynamically determine
+    output dimension of classifier.
+    """
+
+    return len(
+        get_student_folders()
+    )
+
+
+# ============================================================
+# DEBUG
+# ============================================================
+
+if __name__ == "__main__":
+
+    print(
+        "PROJECT ROOT"
+    )
+
+    print(
+        PROJECT_ROOT
+    )
+
+    print()
+
+    print(
+        "STORAGE ROOT"
+    )
+
+    print(
+        STORAGE_ROOT
+    )
+
+    print()
+
+    print(
+        "MODELS DIRECTORY"
+    )
+
+    print(
+        MODELS_DIR
+    )
+
+    print()
+
+    print(
+        "DETECTOR MODEL"
+    )
+
+    print(
+        DET_MODEL_PATH
+    )
+
+    print()
+
+    print(
+        "RECOGNITION MODEL"
+    )
+
+    print(
+        REC_MODEL_PATH
+    )
+
+    print()
+
+    print(
+        "ARTIFACT DIRECTORY"
+    )
+
+    print(
+        ARTIFACT_DIR
+    )
+
+    print()
+
+    print(
+        "OUTPUT DIRECTORY"
+    )
+
+    print(
+        OUTPUT_DIR
+    )
+
+    print()
+
+    print(
+        "Students Found:"
+    )
+
+    print(
+        get_num_students()
+    )
+
+    print()
+
+    print(
+        "Student Folders:"
+    )
+
+    print(
+        get_student_folders()
+    )

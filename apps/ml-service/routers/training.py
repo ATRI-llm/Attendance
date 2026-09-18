@@ -10,7 +10,7 @@ The training pipeline:
   1. build_db_dataset(section_id) — pull embeddings from PostgreSQL
   2. ClassifierTrainer.train()     — PyTorch NN training
   3. ONNXExporter.export()         — export to .onnx
-  4. Upload backbone + classifier  → S3
+  4. Store backbone + classifier in shared local storage
   5. POST /api/model-sync/register-asset → backend DB
 """
 
@@ -148,3 +148,5 @@ def get_training_status(job_id: str) -> TrainJobStatus:
         startedAt=job.get("startedAt"),
         completedAt=job.get("completedAt"),
     )
+
+

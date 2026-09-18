@@ -47,7 +47,7 @@ export const getSectionEmbeddings = async (req: any, res: Response) => {
 };
 // POST /api/model-sync/register-asset
 // Called by the Python training pipeline after a new classifier ONNX is
-// uploaded to S3. Marks the new model as active for the section.
+// stored in shared local storage. Marks the new model as active for the section.
 // Requires ADMIN role (enforced in route).
 export const registerModelAsset = async (req: any, res: Response) => {
   try {
@@ -84,3 +84,4 @@ export const triggerTraining = async (req: any, res: Response) => {
     return res.status(400).json({ success: false, message: error.message });
   }
 };
+

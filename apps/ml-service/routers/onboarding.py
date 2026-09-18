@@ -2,7 +2,7 @@
 routers/onboarding.py
 
 POST /onboard
-  Accepts a list of image URLs (from S3 presigned URLs).
+  Accepts a list of image URLs served by the local backend storage.
   For each image:
     1. Downloads it
     2. Detects the face using SCRFDDetector
@@ -125,3 +125,4 @@ def process_onboarding(body: OnboardRequest) -> OnboardResponse:
         modelVersion="MobileFaceNet-v1",
         skippedImages=skipped,
     )
+

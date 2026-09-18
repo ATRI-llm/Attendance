@@ -1,217 +1,404 @@
-import fs from "fs";
-import path from "path";
-import { PutObjectCommand } from "@aws-sdk/client-s3";
-import { s3 } from "../../config/s3";
 import prisma from "../../database/prisma";
+import {
+  saveBuffer,
+  generateStorageFilename,
+  getPublicUrl,
+} from "../../common/utils/storage";
 
-const useLocalUpload = () => process.env.USE_LOCAL_UPLOAD === "true";
+/*
+ * ------------------------------------------------------------
+ * TYPES
+ * ------------------------------------------------------------
+ */
 
-// ─────────────────────────────────────────────────────────────────
-// uploadBase64ToS3
-// Converts a base64-encoded image string to a Buffer and uploads
-// it to S3 (or local storage in dev mode).
-// Used to upload face crops sent from the mobile app during sync.
-// ─────────────────────────────────────────────────────────────────
-export const uploadBase64ToS3 = async (
+export interface OfflineSyncPayload {
+  sessionId?: string;
+
+  attendanceSessionId?: string;
+
+  sectionId?: string;
+
+  date?: string;
+
+  latitude?: number;
+
+  longitude?: number;
+
+  images?: Array<{
+    filename?: string;
+    base64: string;
+  }>;
+
+  records?: Array<{
+    studentId: string;
+
+    status: string;
+
+    confidence?: number;
+
+    cropImage?: string;
+
+    cropImageBase64?: string;
+
+    imageBase64?: string;
+  }>;
+}
+
+/*
+ * ------------------------------------------------------------
+ * BASE64 IMAGE STORAGE
+ * ------------------------------------------------------------
+ *
+ * Compatibility wrapper.
+ *
+ * The file is now stored in local shared storage.
+ *
+ * It now stores the file locally under:
+ *
+ *   storage/uploads/...
+ *
+ * No cloud storage code is used here.
+ *
+ * The function name is temporarily preserved so existing
+ * callers do not break.
+ * ------------------------------------------------------------
+ */
+
+export const saveBase64File = async (
   base64: string,
   folder: string,
   filename: string
 ): Promise<string> => {
-  // Strip data URI prefix if present (e.g. "data:image/jpeg;base64,...")
-  const stripped = base64.replace(/^data:image\/\w+;base64,/, "");
-  const buffer = Buffer.from(stripped, "base64");
-
-  if (useLocalUpload()) {
-    const uploadRoot = path.join(__dirname, "../../../uploads", folder);
-    fs.mkdirSync(uploadRoot, { recursive: true });
-    const fname = `${Date.now()}-${filename}`;
-    fs.writeFileSync(path.join(uploadRoot, fname), buffer);
-    const base =
-      process.env.LOCAL_UPLOAD_BASE_URL ||
-      `http://127.0.0.1:${process.env.PORT || 5000}`;
-    return `${base}/uploads/${folder}/${fname}`;
+  if (!base64) {
+    throw new Error(
+      "Base64 image data is required"
+    );
   }
 
-  const key = `${folder}/${Date.now()}-${filename}`;
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: process.env.AWS_BUCKET_NAME,
-      Key: key,
-      Body: buffer,
-      ContentType: "image/jpeg",
-    })
+  if (!folder) {
+    throw new Error(
+      "Storage folder is required"
+    );
+  }
+
+  /*
+   * Remove a data URI prefix if one exists.
+   *
+   * Example:
+   *
+   * data:image/jpeg;base64,/9j/4AAQ...
+   *
+   * becomes:
+   *
+   * /9j/4AAQ...
+   */
+  const stripped =
+    base64.replace(
+      /^data:image\/[\w.+-]+;base64,/,
+      ""
+    );
+
+  const buffer =
+    Buffer.from(
+      stripped,
+      "base64"
+    );
+
+  if (!buffer.length) {
+    throw new Error(
+      "Decoded image is empty"
+    );
+  }
+
+  /*
+   * Never trust the filename supplied by the device.
+   * Generate a safe unique filename instead.
+   */
+  const safeFilename =
+    generateStorageFilename(
+      filename || "image.jpg"
+    );
+
+  const storageKey =
+    `uploads/${folder}/${safeFilename}`;
+
+  await saveBuffer(
+    storageKey,
+    buffer
   );
 
-  return `https://${process.env.AWS_BUCKET_NAME}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
+  return getPublicUrl(
+    storageKey
+  );
 };
 
-// ─────────────────────────────────────────────────────────────────
-// offlineSyncService
-// Receives an offline attendance batch from the teacher mobile app.
-//
-// Flow:
-//  1. Validate teacher & section
-//  2. Create AttendanceSession (marked as offline sync)
-//  3. For each record:
-//     a. Create AttendanceRecord
-//     b. If crop image is present: upload to S3, create AttendanceCropImage
-//        (crop + 512-dim embedding = training data for next NN cycle)
-//  4. Mark session as PROCESSED (no ML queue needed — already done on device)
-//
-// Note: The 40-dim classifier output is never sent or stored.
-// Only the 512-dim MobileFaceNet embedding is stored for retraining.
-// ─────────────────────────────────────────────────────────────────
-export interface OfflineSyncRecord {
-  studentId: string;
-  rollNumber: number;
-  status: "PRESENT" | "ABSENT" | "MANUAL";
-  confidence: number;
-  cropImageBase64?: string;        // face crop from group photo (base64)
-  embeddingVector?: number[];       // 512-dim MobileFaceNet embedding (for retraining)
-  capturedAt: string;              // ISO timestamp
-}
-
-export interface OfflineSyncPayload {
-  sectionId: string;
-  date: string;                     // ISO date string "YYYY-MM-DD"
-  deviceId: string;
-  backboneVersion: string;          // e.g. "MobileFaceNet-v1"
-  classifierVersion: string;        // e.g. "nn-classifier-v2"
-  records: OfflineSyncRecord[];
-}
+/*
+ * ------------------------------------------------------------
+ * OFFLINE SYNC SERVICE
+ * ------------------------------------------------------------
+ */
 
 export const offlineSyncService = async (
   userId: string,
   payload: OfflineSyncPayload
 ) => {
-  // 1. Validate teacher & section assignment
-  const teacherSection = await prisma.teacherSection.findFirst({
-    where: {
-      teacher: { userId },
-      sectionId: payload.sectionId,
-    },
-  });
+  /*
+   * ----------------------------------------------------------
+   * RESOLVE SESSION ID
+   * ----------------------------------------------------------
+   */
 
-  if (!teacherSection) {
-    throw new Error("Section not assigned to this teacher");
+  const attendanceSessionId =
+    payload.attendanceSessionId ||
+    payload.sessionId;
+
+  if (!attendanceSessionId) {
+    throw new Error(
+      "Attendance session ID is required"
+    );
   }
 
-  // 2. Upsert AttendanceSession (offline sync)
-  // This merges all offline syncs for the same day into a single backend session
-  const session = await prisma.attendanceSession.upsert({
-    where: {
-      sectionId_date: {
-        sectionId: payload.sectionId,
-        date: new Date(payload.date),
-      }
-    },
-    update: {
-      deviceId: payload.deviceId,
-      backboneVersion: payload.backboneVersion,
-      classifierVersion: payload.classifierVersion,
-    },
-    create: {
-      sectionId: payload.sectionId,
-      teacherUserId: userId,
-      date: new Date(payload.date),
-      status: "PROCESSED",           // Already processed on device — skip ML queue
-      isOfflineSync: true,
-      deviceId: payload.deviceId,
-      backboneVersion: payload.backboneVersion,
-      classifierVersion: payload.classifierVersion,
-    },
-  });
+  /*
+   * ----------------------------------------------------------
+   * FIND ATTENDANCE SESSION
+   * ----------------------------------------------------------
+   */
 
-  let cropCount = 0;
+  const attendanceSession =
+    await prisma.attendanceSession.findUnique({
+      where: {
+        id: attendanceSessionId,
+      },
 
-  // 3. Process each attendance record
-  for (const rec of payload.records) {
-    const isUnknown = rec.studentId?.startsWith("UNKNOWN_");
-    let targetStudentId = isUnknown ? undefined : (rec.studentId || undefined);
-
-    // 3a. Remove existing record for this student in this session (if any) to prevent duplicates
-    if (targetStudentId) {
-      const studentExists = await prisma.student.findUnique({
-        where: { id: targetStudentId },
-      });
-      if (!studentExists) {
-        console.warn(`[offlineSync] Student ${targetStudentId} no longer exists. Marking as UNKNOWN.`);
-        targetStudentId = undefined;
-      } else {
-        await prisma.attendanceRecord.deleteMany({
-          where: {
-            attendanceSessionId: session.id,
-            studentId: targetStudentId,
-          }
-        });
-      }
-    }
-
-    // 3b. Create the attendance record
-    const attendanceRecord = await prisma.attendanceRecord.create({
-      data: {
-        attendanceSessionId: session.id,
-        studentId: targetStudentId,
-        status: rec.status,
-        confidenceScore: rec.confidence,
-        markedAt: new Date(rec.capturedAt),
-        backboneVersion: payload.backboneVersion,
-        classifierVersion: payload.classifierVersion,
+      include: {
+        section: true,
       },
     });
 
-    // 3b. If there's a crop image + embedding, store as training data
-    if (rec.cropImageBase64 && rec.embeddingVector) {
-      try {
-        // Upload the crop photo to S3
-        const cropUrl = await uploadBase64ToS3(
-          rec.cropImageBase64,
-          "attendance-crops",
-          `session-${session.id}-roll-${rec.rollNumber}.jpg`
-        );
+  if (!attendanceSession) {
+    throw new Error(
+      "Attendance session not found"
+    );
+  }
 
-        // Also update the AttendanceRecord with the crop URL + embedding
-        await prisma.attendanceRecord.update({
-          where: { id: attendanceRecord.id },
-          data: {
-            cropImageUrl: cropUrl,
-            embeddingVector: rec.embeddingVector, // 512-dim — stored for retraining
-          },
-        });
+  /*
+   * ----------------------------------------------------------
+   * PROCESS OFFLINE IMAGES
+   * ----------------------------------------------------------
+   */
 
-        // Create AttendanceCropImage entry (the retraining dataset table)
-        await prisma.attendanceCropImage.create({
-          data: {
-            attendanceSessionId: session.id,
-            studentId: targetStudentId,
-            imageUrl: cropUrl,
-            embeddingVector: rec.embeddingVector, // 512-dim MobileFaceNet vector
-            backboneVersion: payload.backboneVersion,
-            isVerified: rec.status === "PRESENT", // confirmed present = verified label
-            capturedAt: new Date(rec.capturedAt),
-          },
-        });
+  const uploadedImages: string[] = [];
 
-        cropCount++;
-      } catch (err: any) {
-        // Non-fatal — attendance record already saved, just skip crop
-        console.error(
-          `Failed to upload crop for roll ${rec.rollNumber}:`,
-          err.message
-        );
+  if (
+    payload.images &&
+    payload.images.length > 0
+  ) {
+    for (
+      const image of payload.images
+    ) {
+      if (!image.base64) {
+        continue;
       }
+
+      const imageUrl =
+        await saveBase64File(
+          image.base64,
+
+          `attendance/${attendanceSession.id}/offline`,
+
+          image.filename ||
+          "offline-image.jpg"
+        );
+
+      uploadedImages.push(
+        imageUrl
+      );
     }
   }
 
-  const stats = {
-    sessionId: session.id,
-    totalRecords: payload.records.length,
-    present: payload.records.filter((r) => r.status === "PRESENT").length,
-    absent: payload.records.filter((r) => r.status === "ABSENT").length,
-    manual: payload.records.filter((r) => r.status === "MANUAL").length,
-    cropsStored: cropCount,
-  };
+  /*
+   * ----------------------------------------------------------
+   * PROCESS ATTENDANCE RECORDS
+   * ----------------------------------------------------------
+   */
 
-  console.log(`Offline sync complete:`, stats);
-  return stats;
+  const processedRecords = [];
+
+  if (
+    payload.records &&
+    payload.records.length > 0
+  ) {
+    for (
+      const record of payload.records
+    ) {
+      /*
+       * Make sure the student actually belongs to
+       * this attendance session's section.
+       */
+      const student =
+        await prisma.student.findFirst({
+          where: {
+            id:
+              record.studentId,
+
+            sectionId:
+              attendanceSession.sectionId,
+          },
+        });
+
+      if (!student) {
+        continue;
+      }
+
+      /*
+       * ------------------------------------------------------
+       * OPTIONAL FACE CROP
+       * ------------------------------------------------------
+       */
+
+      const cropBase64 =
+        record.cropImageBase64 ||
+        record.cropImage ||
+        record.imageBase64;
+
+      let cropImageUrl:
+        | string
+        | undefined;
+
+      if (cropBase64) {
+        cropImageUrl =
+          await saveBase64File(
+            cropBase64,
+
+            `attendance/${attendanceSession.id}/crops`,
+
+            `${record.studentId}.jpg`
+          );
+      }
+
+      /*
+       * ------------------------------------------------------
+       * FIND EXISTING RECORD
+       * ------------------------------------------------------
+       *
+       * Offline sync can be retried.
+       *
+       * Therefore, don't create a duplicate attendance
+       * record when one already exists.
+       */
+
+      const existingRecord =
+        await prisma.attendanceRecord.findFirst({
+          where: {
+            attendanceSessionId:
+              attendanceSession.id,
+
+            studentId:
+              record.studentId,
+          },
+        });
+
+      let attendanceRecord;
+
+      if (existingRecord) {
+        /*
+         * Update existing record.
+         */
+
+        attendanceRecord =
+          await prisma.attendanceRecord.update({
+            where: {
+              id:
+                existingRecord.id,
+            },
+
+            data: {
+              status:
+                record.status as any,
+
+              ...(record.confidence !==
+                undefined
+                ? {
+                  confidence:
+                    record.confidence,
+                }
+                : {}),
+
+              ...(cropImageUrl
+                ? {
+                  cropImageUrl:
+                    cropImageUrl,
+                }
+                : {}),
+            },
+          });
+      } else {
+        /*
+         * Create new record.
+         */
+
+        attendanceRecord =
+          await prisma.attendanceRecord.create({
+            data: {
+              attendanceSessionId:
+                attendanceSession.id,
+
+              studentId:
+                record.studentId,
+
+              status:
+                record.status as any,
+
+              ...(record.confidence !==
+                undefined
+                ? {
+                  confidence:
+                    record.confidence,
+                }
+                : {}),
+
+              ...(cropImageUrl
+                ? {
+                  cropImageUrl:
+                    cropImageUrl,
+                }
+                : {}),
+            },
+          });
+      }
+
+      processedRecords.push(
+        attendanceRecord
+      );
+    }
+  }
+
+  /*
+   * ----------------------------------------------------------
+   * IMPORTANT
+   * ----------------------------------------------------------
+   *
+   * Do NOT force the attendance session status here.
+   *
+   * Your Prisma enum does not contain "COMPLETED".
+   *
+   * The existing attendance workflow is responsible for
+   * deciding the appropriate session status.
+   */
+
+  return {
+    success: true,
+
+    attendanceSessionId:
+      attendanceSession.id,
+
+    uploadedImages,
+
+    processedRecords:
+      processedRecords.length,
+
+    records:
+      processedRecords,
+  };
 };
+

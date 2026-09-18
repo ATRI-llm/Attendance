@@ -9,7 +9,7 @@
  *
  * Flow:
  *   1. Fetch face images for the onboarding session
- *   2. Generate S3 presigned URLs so the ml-service can download them
+ *   2. Prepare local storage URLs so the ml-service can access the files
  *   3. POST to ml-service /onboard → get 512-dim embeddings
  *   4. Store embeddings in StudentFaceEmbedding table
  *   5. Update session + student status
@@ -17,7 +17,7 @@
 
 import axios, { AxiosError } from "axios";
 import prisma from "../config/prisma";
-import { presignImageUrls } from "../utils/s3Presign";
+import { resolveImageUrls } from "../utils/storageUrls";
 import { mlQueue } from "../queues/ml.queue";
 
 const ML_SERVICE_URL = process.env.ML_SERVICE_URL || "http://localhost:8000";
@@ -52,8 +52,8 @@ export const processFaceOnboardingJob = async (data: any) => {
       throw new Error("No images found for onboarding session");
     }
 
-    // 2. Presign S3 URLs so the ml-service can download them directly
-    const imageUrls = await presignImageUrls(images.map((img) => img.imageUrl));
+    // 2. Prepare local storage URLs for the ml-service
+    const imageUrls = await resolveImageUrls(images.map((img) => img.imageUrl));
 
     // 3. Call ml-service — models are already loaded in memory
     console.log(`[onboarding] Calling ml-service with ${imageUrls.length} image(s)...`);
@@ -188,7 +188,7 @@ export const processBatchOnboardingForSection = async (sectionId: string) => {
         throw new Error("No images found for student");
       }
 
-      const imageUrls = await presignImageUrls(images.map((img) => img.imageUrl));
+      const imageUrls = await resolveImageUrls(images.map((img) => img.imageUrl));
 
       let result: OnboardResponse;
       try {
@@ -257,3 +257,6 @@ export const processBatchOnboardingForSection = async (sectionId: string) => {
 
   console.log(`[onboarding] Batch processing completed for section ${sectionId}.`);
 };
+
+
+

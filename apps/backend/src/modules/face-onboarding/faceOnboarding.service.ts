@@ -1,56 +1,105 @@
 import prisma from "../../database/prisma";
 import { validateGeofence } from "../../common/utils/geofence";
 import { mlQueue } from "../../queues/ml.queue";
-import { uploadToS3 } from "../../common/utils/s3Upload";
+
+import {
+  saveMulterFile,
+  generateStorageFilename,
+  getPublicUrl,
+} from "../../common/utils/storage";
 
 export const createFaceOnboardingService = async (
   userId: string,
   body: any,
   files: Express.Multer.File[]
 ) => {
-  const student = await prisma.student.findUnique({
-    where: {
-      id: body.studentId,
-    },
+  /*
+   * ----------------------------------------------------------
+   * FIND STUDENT
+   * ----------------------------------------------------------
+   */
 
-    include: {
-      section: {
-        include: {
-          standard: {
-            include: {
-              school: true,
+  const student =
+    await prisma.student.findUnique({
+      where: {
+        id: body.studentId,
+      },
+
+      include: {
+        section: {
+          include: {
+            standard: {
+              include: {
+                school: true,
+              },
             },
           },
         },
       },
-    },
-  });
+    });
 
   if (!student) {
-    throw new Error("Student not found");
+    throw new Error(
+      "Student not found"
+    );
   }
 
-  const school = student.section.standard.school;
+  /*
+   * ----------------------------------------------------------
+   * VALIDATE FILES
+   * ----------------------------------------------------------
+   */
 
-  const latitude = Number(body.latitude);
-  const longitude = Number(body.longitude);
+  if (!files || files.length === 0) {
+    throw new Error(
+      "At least one face image is required"
+    );
+  }
 
-  const geoResult = validateGeofence(
-    latitude,
-    longitude,
-    school
-  );
+  /*
+   * ----------------------------------------------------------
+   * SCHOOL / GEOFENCE
+   * ----------------------------------------------------------
+   */
+
+  const school =
+    student.section.standard.school;
+
+  const latitude =
+    Number(body.latitude);
+
+  const longitude =
+    Number(body.longitude);
+
+  const geoResult =
+    validateGeofence(
+      latitude,
+      longitude,
+      school
+    );
 
   await prisma.geofenceValidation.create({
     data: {
       teacherUserId: userId,
-      validationType: "FACE_ONBOARDING",
-      latitude: latitude,
-      longitude: longitude,
-      distance: geoResult.distance,
-      isWithinGeofence: geoResult.isInside,
-      schoolId: school.id,
-      referenceId: student.id,
+
+      validationType:
+        "FACE_ONBOARDING",
+
+      latitude,
+
+      longitude,
+
+      distance:
+        geoResult.distance,
+
+      isWithinGeofence:
+        geoResult.isInside,
+
+      schoolId:
+        school.id,
+
+      referenceId:
+        student.id,
     },
   });
 
@@ -60,41 +109,110 @@ export const createFaceOnboardingService = async (
     );
   }
 
+  /*
+   * ----------------------------------------------------------
+   * CREATE ONBOARDING SESSION
+   * ----------------------------------------------------------
+   */
+
   const onboarding =
     await prisma.faceOnboardingSession.create({
       data: {
-        studentId: student.id,
-        teacherUserId: userId,
-        sectionId: student.sectionId,
-        status: "IMAGES_CAPTURED",
-        totalImages: files.length,
+        studentId:
+          student.id,
+
+        teacherUserId:
+          userId,
+
+        sectionId:
+          student.sectionId,
+
+        status:
+          "IMAGES_CAPTURED",
+
+        totalImages:
+          files.length,
       },
     });
 
+  /*
+   * ----------------------------------------------------------
+   * SAVE FACE IMAGES
+   * ----------------------------------------------------------
+   *
+   * New storage structure:
+   *
+   * storage/
+   *   uploads/
+   *     face-onboarding/
+   *       <studentId>/
+   *         <onboardingSessionId>/
+   *           <unique-file>.jpg
+   *
+   * The database continues to use `imageUrl`
+   * for compatibility with the existing application.
+   *
+   * The URL points to the backend local storage endpoint.
+   */
+
   for (const file of files) {
-    const imageUrl = await uploadToS3(file,"face-onboarding");
+    const filename =
+      generateStorageFilename(
+        file.originalname
+      );
+
+    const storageKey =
+      `uploads/face-onboarding/${student.id}/${onboarding.id}/${filename}`;
+
+    await saveMulterFile(
+      file,
+      storageKey
+    );
+
+    const imageUrl =
+      getPublicUrl(storageKey);
 
     await prisma.studentFaceImage.create({
       data: {
-        studentId: student.id,
-        onboardingSessionId: onboarding.id,
+        studentId:
+          student.id,
+
+        onboardingSessionId:
+          onboarding.id,
+
         imageUrl,
-        fileSize: file.size,
-        mimeType: file.mimetype,
+
+        fileSize:
+          file.size,
+
+        mimeType:
+          file.mimetype,
       },
     });
   }
+
+  /*
+   * ----------------------------------------------------------
+   * UPDATE FACE STATUS
+   * ----------------------------------------------------------
+   */
 
   await prisma.student.update({
     where: {
       id: student.id,
     },
+
     data: {
-      faceStatus: "PENDING",
+      faceStatus:
+        "PENDING",
     },
   });
 
-  return onboarding;
+  /*
+   * ----------------------------------------------------------
+   * RETURN
+   * ----------------------------------------------------------
+   */
 
-  // Duplicate removed
+  return onboarding;
 };

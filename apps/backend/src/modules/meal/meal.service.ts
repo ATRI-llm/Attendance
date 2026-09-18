@@ -1,7 +1,7 @@
 import prisma from "../../database/prisma";
 import {validateGeofence,} from "../../common/utils/geofence";
 import { mlQueue } from "../../queues/ml.queue";
-import { uploadToS3 } from "../../common/utils/s3Upload";
+import { saveUploadedFile } from "../../common/utils/storageUpload";
 
 export const createMealSessionService = async (
   userId:string,
@@ -65,7 +65,7 @@ export const createMealSessionService = async (
     });
 
   for (const file of files) {
-    const imageUrl =await uploadToS3(file,"meals");
+    const imageUrl =await saveUploadedFile(file,"meals");
 
     await prisma.mealImage.create({
       data:{

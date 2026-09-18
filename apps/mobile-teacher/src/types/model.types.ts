@@ -13,8 +13,8 @@ export interface ModelAsset {
   backboneVersion: string;    // e.g. "MobileFaceNet-v1"
   classifierVersion: string;  // e.g. "nn-classifier-v2"
   sectionId: string;
-  backboneUrl: string;        // S3 URL to download backbone .onnx / .tflite
-  classifierUrl: string;      // S3 URL to download classifier .onnx / .tflite
+  backboneUrl: string;        
+  classifierUrl: string;      
   trainedAt: string;          // ISO timestamp
   description?: string;
 }

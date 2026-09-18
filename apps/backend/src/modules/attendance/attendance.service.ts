@@ -1,118 +1,267 @@
 import prisma from "../../database/prisma";
-import { validateGeofence }from "../../common/utils/geofence";
-import { mlQueue }from "../../queues/ml.queue";
-import { uploadToS3 } from "../../common/utils/s3Upload";
+import { validateGeofence } from "../../common/utils/geofence";
+import { mlQueue } from "../../queues/ml.queue";
 
-export const createAttendanceService =async (userId: string,body: any,files: Express.Multer.File[]) => {
-    const teacherSection = await prisma.teacherSection.findFirst({
-        where: {
-          teacher: {
-            userId,
-          },
+import {
+  saveMulterFile,
+  generateStorageFilename,
+  getPublicUrl,
+} from "../../common/utils/storage";
 
-          sectionId: body.sectionId,
+export const createAttendanceService = async (
+  userId: string,
+  body: any,
+  files: Express.Multer.File[]
+) => {
+  /*
+   * ----------------------------------------------------------
+   * VALIDATE TEACHER SECTION
+   * ----------------------------------------------------------
+   */
+
+  const teacherSection =
+    await prisma.teacherSection.findFirst({
+      where: {
+        teacher: {
+          userId,
         },
 
-        include: {
-          section: {
-            include: {
-              standard: {
-                include: {
-                  school: true,
-                },
+        sectionId:
+          body.sectionId,
+      },
+
+      include: {
+        section: {
+          include: {
+            standard: {
+              include: {
+                school: true,
               },
             },
           },
         },
-      });
-
-    if (!teacherSection) {
-      throw new Error("Section not assigned");
-    }
-
-    const school = teacherSection.section.standard.school;
-    const geoResult =validateGeofence(body.latitude,body.longitude,school);
-
-    await prisma.geofenceValidation.create({
-      data: {
-        teacherUserId: userId,
-        validationType:"ATTENDANCE",
-        latitude:Number(body.latitude),
-        longitude:Number(body.longitude),
-        distance:geoResult.distance,
-        isWithinGeofence:geoResult.isInside,
-        schoolId: school.id,
       },
     });
 
-    if (!geoResult.isInside) {
-      throw new Error("Outside school premises");
-    }
+  if (!teacherSection) {
+    throw new Error(
+      "Section not assigned"
+    );
+  }
 
-    const attendanceSession =
-      await prisma.attendanceSession.create({
-        data: {
-          sectionId: body.sectionId,
-          teacherUserId:userId,
-          date: new Date(),
-          status: "PENDING",
-        },
-      });
+  /*
+   * ----------------------------------------------------------
+   * VALIDATE FILES
+   * ----------------------------------------------------------
+   */
 
-    for (const file of files) {
-      const imageUrl =await uploadToS3(file,"attendance");
+  if (!files || files.length === 0) {
+    throw new Error(
+      "At least one attendance image is required"
+    );
+  }
 
-      await prisma.attendanceImage.create({
-        data: {
-          attendanceSessionId:attendanceSession.id,
-          imageUrl,
-          mimeType:file.mimetype,
-          fileSize:file.size,
-        },
-      });
-    }
+  /*
+   * ----------------------------------------------------------
+   * GEOFENCE
+   * ----------------------------------------------------------
+   */
 
-    const mlJob =
-      await prisma.mlProcessingJob.create({
-        data: {
-          attendanceSessionId: attendanceSession.id,
-          jobType: "ATTENDANCE_PROCESSING",
-          status: "PENDING",
-        },
-      });
+  const school =
+    teacherSection.section.standard.school;
 
-    await mlQueue.add( "ATTENDANCE_PROCESSING",
-      {
-        mlJobId: mlJob.id,
-        attendanceSessionId:attendanceSession.id,
-        sectionId:body.sectionId,
-      }
+  const geoResult =
+    validateGeofence(
+      Number(body.latitude),
+      Number(body.longitude),
+      school
     );
 
-    return attendanceSession;
-  };
+  await prisma.geofenceValidation.create({
+    data: {
+      teacherUserId:
+        userId,
 
-export const getAttendanceSessionService = async (sessionId: string) => {
-    return prisma.attendanceSession .findUnique({
-        where: {
-          id: sessionId,
-        },
+      validationType:
+        "ATTENDANCE",
 
-        include: {
-          records: {
-            include: {
-              student: {
-                include: {
-                  user: true,
-                },
-              },
-            },
-          },
-        },
-      });
+      latitude:
+        Number(body.latitude),
+
+      longitude:
+        Number(body.longitude),
+
+      distance:
+        geoResult.distance,
+
+      isWithinGeofence:
+        geoResult.isInside,
+
+      schoolId:
+        school.id,
+    },
+  });
+
+  if (!geoResult.isInside) {
+    throw new Error(
+      "Outside school premises"
+    );
+  }
+
+  /*
+   * ----------------------------------------------------------
+   * CREATE ATTENDANCE SESSION
+   * ----------------------------------------------------------
+   */
+
+  const attendanceSession =
+    await prisma.attendanceSession.create({
+      data: {
+        sectionId:
+          body.sectionId,
+
+        teacherUserId:
+          userId,
+
+        date:
+          new Date(),
+
+        status:
+          "PENDING",
+      },
+    });
+
+  /*
+   * ----------------------------------------------------------
+   * SAVE ATTENDANCE IMAGES
+   * ----------------------------------------------------------
+   *
+   * storage/
+   *   uploads/
+   *     attendance/
+   *       <attendanceSessionId>/
+   *         original/
+   *           <file>.jpg
+   */
+
+  for (const file of files) {
+    const filename =
+      generateStorageFilename(
+        file.originalname
+      );
+
+    const storageKey =
+      `uploads/attendance/${attendanceSession.id}/original/${filename}`;
+
+    await saveMulterFile(
+      file,
+      storageKey
+    );
+
+    /*
+     * Keep imageUrl in DB for API compatibility.
+     *
+     * It is now a local backend URL.
+     */
+
+    const imageUrl =
+      getPublicUrl(storageKey);
+
+    await prisma.attendanceImage.create({
+      data: {
+        attendanceSessionId:
+          attendanceSession.id,
+
+        imageUrl,
+
+        mimeType:
+          file.mimetype,
+
+        fileSize:
+          file.size,
+      },
+    });
+  }
+
+  /*
+   * ----------------------------------------------------------
+   * CREATE ML JOB
+   * ----------------------------------------------------------
+   */
+
+  const mlJob =
+    await prisma.mlProcessingJob.create({
+      data: {
+        attendanceSessionId:
+          attendanceSession.id,
+
+        jobType:
+          "ATTENDANCE_PROCESSING",
+
+        status:
+          "PENDING",
+      },
+    });
+
+  /*
+   * ----------------------------------------------------------
+   * QUEUE ML PROCESSING
+   * ----------------------------------------------------------
+   */
+
+  await mlQueue.add(
+    "ATTENDANCE_PROCESSING",
+    {
+      mlJobId:
+        mlJob.id,
+
+      attendanceSessionId:
+        attendanceSession.id,
+
+      sectionId:
+        body.sectionId,
+    }
+  );
+
+  return attendanceSession;
 };
 
-export const finalizeAttendanceService =async (sessionId: string) => {
+/*
+ * ------------------------------------------------------------
+ * GET ATTENDANCE SESSION
+ * ------------------------------------------------------------
+ */
+
+export const getAttendanceSessionService =
+  async (
+    sessionId: string
+  ) => {
+    return prisma.attendanceSession.findUnique({
+      where: {
+        id: sessionId,
+      },
+
+      include: {
+        images: true,
+        records: {
+          include: {
+            student: true,
+          },
+        },
+      },
+    });
+  };
+
+/*
+ * ------------------------------------------------------------
+ * FINALIZE ATTENDANCE
+ * ------------------------------------------------------------
+ */
+
+export const finalizeAttendanceService =
+  async (
+    sessionId: string
+  ) => {
     return prisma.attendanceSession.update({
       where: {
         id: sessionId,
@@ -122,65 +271,54 @@ export const finalizeAttendanceService =async (sessionId: string) => {
         status: "FINALIZED",
       },
     });
-};
+  };
 
-export const updateAttendanceRecordService =async (recordId: string,body: any) => {
+/*
+ * ------------------------------------------------------------
+ * UPDATE ATTENDANCE RECORD
+ * ------------------------------------------------------------
+ */
+
+export const updateAttendanceRecordService =
+  async (
+    recordId: string,
+    status: string
+  ) => {
     return prisma.attendanceRecord.update({
       where: {
         id: recordId,
       },
 
       data: {
-        status: body.status,
-        isManualOverride: true,
+        status: status as any,
       },
     });
-};
+  };
 
+/*
+ * ------------------------------------------------------------
+ * ATTENDANCE HISTORY
+ * ------------------------------------------------------------
+ */
 
-export const getAttendanceHistoryService =async (userId:string) => {
-    const teacherSection = await prisma.teacherSection.findFirst({
-        where:{
-          teacher:{
-            userId,
-          },
-        },
-      });
+export const getAttendanceHistoryService =
+  async (
+    userId: string
+  ) => {
+    return prisma.attendanceSession.findMany({
+      where: {
+        teacherUserId:
+          userId,
+      },
 
-    if (!teacherSection) {
-      throw new Error(
-        "Teacher section not found"
-      );
-    }
+      orderBy: {
+        createdAt:
+          "desc",
+      },
 
-    const sessions = await prisma.attendanceSession.findMany({
-        where:{
-          sectionId:
-            teacherSection.sectionId,
-        },
-
-        include:{
-          records:true,
-        },
-
-        orderBy:{
-          createdAt:"desc",
-        },
-      });
-
-    return sessions.map((session) => {
-      const present = session.records.filter((record) =>record.status === "PRESENT").length;
-
-      const absent =session.records.filter((record) =>  record.status === "ABSENT").length;
-
-      const total =present + absent;
-      return {
-        id:session.id,
-        date:session.date,
-        status:session.status,
-        present,
-        absent,
-        attendancePercentage: total > 0? Math.round((present / total) * 100): 0,
-      };
+      include: {
+        section: true,
+        records: true,
+      },
     });
-};
+  };
