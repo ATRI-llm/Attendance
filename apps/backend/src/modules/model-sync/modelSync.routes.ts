@@ -34,6 +34,6 @@ router.post(
 
 // POST /api/model-sync/train/:sectionId
 // Trigger ML classifier training for a section
-router.post("/train/:sectionId", triggerTraining);
+router.post("/train/:sectionId", authorise(["ADMIN", "TEACHER"]), triggerTraining);
 
 export default router;

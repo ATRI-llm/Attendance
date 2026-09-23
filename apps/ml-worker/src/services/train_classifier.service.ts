@@ -1,27 +1,12 @@
-/**
- * services/train_classifier.service.ts
- *
- * BullMQ job handler for TRAIN_CLASSIFIER.
- *
- * Delegates training to the Python ml-service via HTTP.
- * Training is async — ml-service returns a job_id immediately
- * and we poll GET /train/{job_id} until complete.
- *
- * Flow:
- *   1. POST ml-service /train → receive { jobId }
- *   2. Poll GET /train/{jobId} every 10s until status = completed | failed
- *   3. Update mlProcessingJob in DB accordingly
- */
-
 import axios, { AxiosError } from "axios";
 import prisma from "../config/prisma";
 import { processBatchOnboardingForSection } from "./onboarding.service";
 
-const ML_SERVICE_URL = process.env.ML_SERVICE_URL || "http://localhost:8000";
-const POLL_INTERVAL_MS = 10_000;
-const MAX_POLL_ATTEMPTS = 180; // 30 minutes max
-
-// ── Helpers ──────────────────────────────────────────────────────
+const ML_SERVICE_URL = (
+  process.env.ML_SERVICE_URL || "http://localhost:8000"
+).replace(/\/$/, "");
+const POLL_INTERVAL_MS = Number(process.env.ML_TRAIN_POLL_INTERVAL_MS || 10_000);
+const MAX_POLL_ATTEMPTS = Number(process.env.ML_TRAIN_MAX_POLL_ATTEMPTS || 180);
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -42,63 +27,66 @@ interface TrainJobStatus {
   completedAt?: string;
 }
 
-// ── Job handler ──────────────────────────────────────────────────
-
 export const processTrainClassifierJob = async (data: any) => {
-  console.log(
-    "[trainer] Processing job:", data.mlJobId,
-    "| section:", data.sectionId
-  );
+  const { mlJobId, sectionId } = data;
+
+  if (!mlJobId || !sectionId) {
+    throw new Error("TRAIN_CLASSIFIER job is missing required identifiers");
+  }
+
+  console.log(`[trainer] Processing job ${mlJobId} | section=${sectionId}`);
 
   await prisma.mlProcessingJob.update({
-    where: { id: data.mlJobId },
-    data: { status: "PROCESSING", startedAt: new Date() },
+    where: { id: mlJobId },
+    data: { status: "PROCESSING", startedAt: new Date(), errorMessage: null },
   });
 
   try {
-    // 1. First, process any pending face onboardings for this section
-    console.log(`[trainer] Processing pending onboardings for section ${data.sectionId}`);
-    await processBatchOnboardingForSection(data.sectionId);
+    await processBatchOnboardingForSection(sectionId);
 
-    // 2. Start the async training job in ml-service
-    console.log(`[trainer] Starting training via ml-service for section ${data.sectionId}`);
-
-    let mlJobId: string;
+    let remoteJobId: string;
     try {
       const response = await axios.post(
         `${ML_SERVICE_URL}/train`,
-        {
-          sectionId: data.sectionId,
-          version: data.version || "v1",
-        },
+        { sectionId, version: data.version || "v1" },
         { timeout: 30_000 }
       );
-      mlJobId = response.data.jobId;
-      console.log(`[trainer] ml-service accepted training job: ${mlJobId}`);
-    } catch (err: any) {
-      const axiosErr = err as AxiosError<{ detail: string }>;
-      const detail = axiosErr.response?.data?.detail || axiosErr.message;
+      remoteJobId = response.data?.jobId;
+      if (!remoteJobId) {
+        throw new Error("ml-service /train did not return jobId");
+      }
+    } catch (error: any) {
+      const axiosError = error as AxiosError<{ detail?: string }>;
+      const detail = axiosError.response?.data?.detail || axiosError.message;
       throw new Error(`ml-service /train failed: ${detail}`);
     }
 
-    // 2. Poll until training completes or fails
-    let attempts = 0;
-    while (attempts < MAX_POLL_ATTEMPTS) {
+    let completed = false;
+    let finalStatus: TrainJobStatus | undefined;
+
+    for (let attempt = 1; attempt <= MAX_POLL_ATTEMPTS; attempt += 1) {
       await sleep(POLL_INTERVAL_MS);
-      attempts++;
 
-      const pollResponse = await axios.get<TrainJobStatus>(
-        `${ML_SERVICE_URL}/train/${mlJobId}`,
-        { timeout: 10_000 }
-      );
+      let jobStatus: TrainJobStatus;
+      try {
+        const response = await axios.get<TrainJobStatus>(
+          `${ML_SERVICE_URL}/train/${remoteJobId}`,
+          { timeout: 15_000 }
+        );
+        jobStatus = response.data;
+      } catch (error: any) {
+        const axiosError = error as AxiosError<{ detail?: string }>;
+        const detail = axiosError.response?.data?.detail || axiosError.message;
+        throw new Error(`ml-service training status check failed: ${detail}`);
+      }
 
-      const jobStatus = pollResponse.data;
+      finalStatus = jobStatus;
       console.log(
-        `[trainer] Poll #${attempts} | ml-job=${mlJobId} | status=${jobStatus.status}`
+        `[trainer] Poll #${attempt} | remote=${remoteJobId} | status=${jobStatus.status}`
       );
 
       if (jobStatus.status === "completed") {
-        console.log("[trainer] Training complete:", jobStatus.result);
+        completed = true;
         break;
       }
 
@@ -109,27 +97,45 @@ export const processTrainClassifierJob = async (data: any) => {
       }
     }
 
-    if (attempts >= MAX_POLL_ATTEMPTS) {
-      throw new Error("Training timed out after 30 minutes");
+    // Check the final observed status before declaring a timeout. This avoids
+    // a false timeout when the last polling request reports completion.
+    if (!completed && finalStatus?.status !== "completed") {
+      throw new Error(`Training timed out after ${MAX_POLL_ATTEMPTS} polling attempts`);
     }
 
-    // 3. Mark job as complete
     await prisma.mlProcessingJob.update({
-      where: { id: data.mlJobId },
-      data: { status: "COMPLETED", completedAt: new Date() },
+      where: { id: mlJobId },
+      data: {
+        status: "COMPLETED",
+        completedAt: new Date(),
+        responsePayload: finalStatus?.result
+          ? {
+              remoteJobId,
+              classifierVersion: finalStatus.result.classifierVersion,
+              backboneVersion: finalStatus.result.backboneVersion,
+              classifierUrl: finalStatus.result.classifierUrl,
+              backboneUrl: finalStatus.result.backboneUrl,
+              numClasses: finalStatus.result.numClasses,
+              numSamples: finalStatus.result.numSamples,
+            }
+          : { remoteJobId },
+      },
     });
 
-    console.log(`[trainer] Job ${data.mlJobId} completed successfully`);
+    console.log(`[trainer] Job ${mlJobId} completed successfully`);
   } catch (error: any) {
-    console.error("[trainer] Job failed:", error.message);
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[trainer] Job ${mlJobId} failed: ${message}`);
 
     await prisma.mlProcessingJob.update({
-      where: { id: data.mlJobId },
+      where: { id: mlJobId },
       data: {
         status: "FAILED",
         completedAt: new Date(),
-        errorMessage: error.message,
+        errorMessage: message,
       },
     });
+
+    throw error;
   }
 };

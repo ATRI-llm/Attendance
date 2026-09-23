@@ -8,7 +8,9 @@ import {
 
 import { authenticate } from "../../common/middlewares/auth.middleware";
 import { authorise } from "../../common/middlewares/role.guard";
-import {uploadMealImages,} from "../../common/middlewares/uploadFace.middleware";
+import { uploadMealImages, } from "../../common/middlewares/uploadFace.middleware";
+import { validate } from "../../common/middlewares/validate.middleware";
+import { createMealSessionSchema } from "./meal.validation";
 
 const router = Router();
 
@@ -16,7 +18,8 @@ router.post(
   "/",
   authenticate,
   authorise(["TEACHER"]),
-  uploadMealImages.array("images",10),
+  uploadMealImages.array("images", 10),
+  validate(createMealSessionSchema),
   createMealSession
 );
 

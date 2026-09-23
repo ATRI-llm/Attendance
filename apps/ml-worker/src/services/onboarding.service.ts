@@ -1,28 +1,10 @@
-/**
- * services/onboarding.service.ts
- *
- * BullMQ job handler for FACE_EMBEDDING_GENERATION.
- *
- * Delegates all ML computation to the Python ml-service via HTTP.
- * The ml-service runs ONNX models in-process (loaded once at startup),
- * so there is no cold-start overhead per job.
- *
- * Flow:
- *   1. Fetch face images for the onboarding session
- *   2. Prepare local storage URLs so the ml-service can access the files
- *   3. POST to ml-service /onboard → get 512-dim embeddings
- *   4. Store embeddings in StudentFaceEmbedding table
- *   5. Update session + student status
- */
-
 import axios, { AxiosError } from "axios";
 import prisma from "../config/prisma";
 import { resolveImageUrls } from "../utils/storageUrls";
-import { mlQueue } from "../queues/ml.queue";
 
-const ML_SERVICE_URL = process.env.ML_SERVICE_URL || "http://localhost:8000";
-
-// ── Types ────────────────────────────────────────────────────────
+const ML_SERVICE_URL = (
+  process.env.ML_SERVICE_URL || process.env.MODEL_URL || "http://localhost:8000"
+).replace(/\/$/, "");
 
 interface OnboardResponse {
   success: boolean;
@@ -32,231 +14,211 @@ interface OnboardResponse {
   skippedImages: number;
 }
 
-// ── Job handler ──────────────────────────────────────────────────
+async function extractEmbeddings(studentId: string, imageUrls: string[]): Promise<OnboardResponse> {
+  try {
+    const response = await axios.post<OnboardResponse>(
+      `${ML_SERVICE_URL}/onboard`,
+      { imageUrls, studentId },
+      { timeout: 120_000 }
+    );
+    return response.data;
+  } catch (error: any) {
+    const axiosError = error as AxiosError<{ detail?: string }>;
+    const detail = axiosError.response?.data?.detail || axiosError.message;
+    throw new Error(`ml-service /onboard failed: ${detail}`);
+  }
+}
+
+async function replaceStudentEmbeddings(
+  studentId: string,
+  result: OnboardResponse
+): Promise<void> {
+  if (!result.success || !Array.isArray(result.embeddings) || result.embeddings.length === 0) {
+    throw new Error(`ml-service returned no embeddings. Faces found: ${result.facesFound}`);
+  }
+
+  await prisma.$transaction(async (tx) => {
+    // Makes retries safe: a partially completed previous attempt cannot duplicate embeddings.
+    await tx.studentFaceEmbedding.deleteMany({ where: { studentId } });
+
+    await tx.studentFaceEmbedding.createMany({
+      data: result.embeddings.map((embedding) => ({
+        studentId,
+        embedding,
+        modelVersion: result.modelVersion,
+      })),
+    });
+  });
+}
 
 export const processFaceOnboardingJob = async (data: any) => {
-  console.log("[onboarding] Processing job:", data.mlJobId, "| student:", data.studentId);
+  const { mlJobId, onboardingSessionId, studentId } = data;
+
+  if (!mlJobId || !onboardingSessionId || !studentId) {
+    throw new Error("FACE_EMBEDDING_GENERATION job is missing required identifiers");
+  }
+
+  console.log(`[onboarding] Processing job ${mlJobId} | student=${studentId}`);
 
   await prisma.mlProcessingJob.update({
-    where: { id: data.mlJobId },
-    data: { status: "PROCESSING", startedAt: new Date() },
+    where: { id: mlJobId },
+    data: { status: "PROCESSING", startedAt: new Date(), errorMessage: null },
   });
 
   try {
-    // 1. Fetch image records
+    await prisma.faceOnboardingSession.update({
+      where: { id: onboardingSessionId },
+      data: { status: "PROCESSING" },
+    });
+
     const images = await prisma.studentFaceImage.findMany({
-      where: { onboardingSessionId: data.onboardingSessionId },
+      where: { onboardingSessionId, studentId },
+      select: { imageUrl: true },
+      orderBy: { createdAt: "asc" },
     });
 
     if (images.length === 0) {
       throw new Error("No images found for onboarding session");
     }
 
-    // 2. Prepare local storage URLs for the ml-service
-    const imageUrls = await resolveImageUrls(images.map((img) => img.imageUrl));
+    const imageUrls = await resolveImageUrls(images.map((image) => image.imageUrl));
+    const result = await extractEmbeddings(studentId, imageUrls);
 
-    // 3. Call ml-service — models are already loaded in memory
-    console.log(`[onboarding] Calling ml-service with ${imageUrls.length} image(s)...`);
+    await replaceStudentEmbeddings(studentId, result);
 
-    let result: OnboardResponse;
-    try {
-      const response = await axios.post<OnboardResponse>(
-        `${ML_SERVICE_URL}/onboard`,
-        {
-          imageUrls,
-          studentId: data.studentId,
-        },
-        { timeout: 120_000 } // 2 min max for large batches
-      );
-      result = response.data;
-    } catch (err: any) {
-      const axiosErr = err as AxiosError<{ detail: string }>;
-      const detail = axiosErr.response?.data?.detail || axiosErr.message;
-      throw new Error(`ml-service /onboard failed: ${detail}`);
-    }
-
-    if (!result.success || result.embeddings.length === 0) {
-      throw new Error(
-        `ml-service returned no embeddings. Faces found: ${result.facesFound}`
-      );
-    }
-
-    // 4. Store each embedding separately (one row per detected face)
-    for (const embedding of result.embeddings) {
-      await prisma.studentFaceEmbedding.create({
+    await prisma.$transaction([
+      prisma.faceOnboardingSession.update({
+        where: { id: onboardingSessionId },
+        data: { status: "COMPLETED" },
+      }),
+      prisma.student.update({
+        where: { id: studentId },
+        data: { faceStatus: "ADDED" },
+      }),
+      prisma.mlProcessingJob.update({
+        where: { id: mlJobId },
         data: {
-          studentId: data.studentId,
-          embedding: embedding,
-          modelVersion: result.modelVersion,
+          status: "COMPLETED",
+          completedAt: new Date(),
+          responsePayload: {
+            facesFound: result.facesFound,
+            skippedImages: result.skippedImages,
+            embeddingCount: result.embeddings.length,
+            modelVersion: result.modelVersion,
+          },
         },
-      });
-    }
-
-    // 5. Update session + student
-    await prisma.faceOnboardingSession.update({
-      where: { id: data.onboardingSessionId },
-      data: { status: "COMPLETED" },
-    });
-
-    const student = await prisma.student.update({
-      where: { id: data.studentId },
-      data: { faceStatus: "ADDED" },
-    });
-
-    await prisma.mlProcessingJob.update({
-      where: { id: data.mlJobId },
-      data: { status: "COMPLETED", completedAt: new Date() },
-    });
+      }),
+    ]);
 
     console.log(
-      `[onboarding] Done. Embeddings stored: ${result.facesFound} | Skipped: ${result.skippedImages}`
+      `[onboarding] Completed ${mlJobId}: embeddings=${result.embeddings.length}, skipped=${result.skippedImages}`
     );
   } catch (error: any) {
-    console.error("[onboarding] Job failed:", error.message);
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[onboarding] Job ${mlJobId} failed: ${message}`);
 
-    await prisma.faceOnboardingSession.update({
-      where: { id: data.onboardingSessionId },
-      data: { status: "FAILED" },
-    });
+    await prisma.$transaction([
+      prisma.faceOnboardingSession.update({
+        where: { id: onboardingSessionId },
+        data: { status: "FAILED" },
+      }),
+      prisma.student.update({
+        where: { id: studentId },
+        data: { faceStatus: "RESCAN" },
+      }),
+      prisma.mlProcessingJob.update({
+        where: { id: mlJobId },
+        data: {
+          status: "FAILED",
+          completedAt: new Date(),
+          errorMessage: message,
+        },
+      }),
+    ]);
 
-    await prisma.student.update({
-      where: { id: data.studentId },
-      data: { faceStatus: "RESCAN" },
-    });
-
-    await prisma.mlProcessingJob.update({
-      where: { id: data.mlJobId },
-      data: {
-        status: "FAILED",
-        completedAt: new Date(),
-        errorMessage: error.message,
-      },
-    });
+    throw error;
   }
 };
 
 export const processBatchOnboardingForSection = async (sectionId: string) => {
-  console.log(`[onboarding] Processing batch onboarding for section: ${sectionId}`);
-
   const pendingSessions = await prisma.faceOnboardingSession.findMany({
+    where: { sectionId, status: "IMAGES_CAPTURED" },
+    orderBy: { createdAt: "asc" },
+    select: { id: true, studentId: true },
+  });
+
+  // Recovery covers older data where images exist but the original ML job was lost.
+  const studentsMissingEmbeddings = await prisma.student.findMany({
     where: {
       sectionId,
-      status: "IMAGES_CAPTURED",
-    }
+      faceEmbeddings: { none: {} },
+      faceImages: { some: {} },
+    },
+    select: { id: true },
   });
 
-  // RECOVERY: Find students who have images but no embeddings (e.g., if DB was partially wiped)
-  const students = await prisma.student.findMany({
-    where: { sectionId },
-    include: { faceImages: true, faceEmbeddings: true }
-  });
+  const pendingStudentIds = new Set(pendingSessions.map((session) => session.studentId));
+  const recoveryStudents = studentsMissingEmbeddings.filter(
+    (student) => !pendingStudentIds.has(student.id)
+  );
 
-  for (const student of students) {
-    if (student.faceEmbeddings.length === 0 && student.faceImages.length > 0) {
-      // Check if this student is already in pendingSessions to avoid duplicates
-      if (!pendingSessions.some(s => s.studentId === student.id)) {
-        console.log(`[onboarding] Recovery: Found missing embeddings for student ${student.id}. Queuing for extraction.`);
-        pendingSessions.push({
-          id: `RECOVERY_${student.id}`,
-          studentId: student.id,
-          sectionId: sectionId,
-          status: "IMAGES_CAPTURED",
-          createdAt: new Date(),
-          updatedAt: new Date()
-        } as any);
-      }
-    }
-  }
+  let failures = 0;
+  const sessions = [
+    ...pendingSessions.map((session) => ({ sessionId: session.id, studentId: session.studentId })),
+    ...recoveryStudents.map((student) => ({ sessionId: null, studentId: student.id })),
+  ];
 
-  if (pendingSessions.length === 0) {
-    console.log(`[onboarding] No pending onboarding sessions found for section ${sectionId}.`);
-    return;
-  }
-
-  console.log(`[onboarding] Found ${pendingSessions.length} pending sessions. Starting extraction...`);
-
-  for (const session of pendingSessions) {
+  for (const item of sessions) {
     try {
-      console.log(`[onboarding] Extracting embeddings for student: ${session.studentId}`);
-
-      // Fetch images by studentId so we find them even if the session record was deleted
       const images = await prisma.studentFaceImage.findMany({
-        where: { studentId: session.studentId },
+        where: item.sessionId
+          ? { onboardingSessionId: item.sessionId, studentId: item.studentId }
+          : { studentId: item.studentId },
+        select: { imageUrl: true },
+        orderBy: { createdAt: "asc" },
       });
 
       if (images.length === 0) {
-        throw new Error("No images found for student");
+        throw new Error(`No face images found for student ${item.studentId}`);
       }
 
-      const imageUrls = await resolveImageUrls(images.map((img) => img.imageUrl));
+      const result = await extractEmbeddings(
+        item.studentId,
+        await resolveImageUrls(images.map((image) => image.imageUrl))
+      );
+      await replaceStudentEmbeddings(item.studentId, result);
 
-      let result: OnboardResponse;
-      try {
-        const response = await axios.post<OnboardResponse>(
-          `${ML_SERVICE_URL}/onboard`,
-          {
-            imageUrls,
-            studentId: session.studentId,
-          },
-          { timeout: 120_000 }
-        );
-        result = response.data;
-      } catch (err: any) {
-        const axiosErr = err as AxiosError<{ detail: string }>;
-        const detail = axiosErr.response?.data?.detail || axiosErr.message;
-        throw new Error(`ml-service /onboard failed: ${detail}`);
-      }
-
-      if (!result.success || result.embeddings.length === 0) {
-        throw new Error(`ml-service returned no embeddings. Faces found: ${result.facesFound}`);
-      }
-
-      await prisma.studentFaceEmbedding.deleteMany({
-        where: { studentId: session.studentId }
-      });
-
-      for (const embedding of result.embeddings) {
-        await prisma.studentFaceEmbedding.create({
-          data: {
-            studentId: session.studentId,
-            embedding: embedding,
-            modelVersion: result.modelVersion,
-          },
-        });
-      }
-
-      if (!session.id.startsWith("RECOVERY_")) {
+      if (item.sessionId) {
         await prisma.faceOnboardingSession.update({
-          where: { id: session.id },
+          where: { id: item.sessionId },
           data: { status: "COMPLETED" },
         });
       }
 
       await prisma.student.update({
-        where: { id: session.studentId },
+        where: { id: item.studentId },
         data: { faceStatus: "ADDED" },
       });
-
-      console.log(`[onboarding] Success for student ${session.studentId}. Embeddings stored: ${result.facesFound}`);
     } catch (error: any) {
-      console.error(`[onboarding] Failed for student ${session.studentId}:`, error.message);
+      failures += 1;
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[onboarding] Batch extraction failed for ${item.studentId}: ${message}`);
 
-      if (!session.id.startsWith("RECOVERY_")) {
+      if (item.sessionId) {
         await prisma.faceOnboardingSession.update({
-          where: { id: session.id },
+          where: { id: item.sessionId },
           data: { status: "FAILED" },
         });
       }
 
       await prisma.student.update({
-        where: { id: session.studentId },
+        where: { id: item.studentId },
         data: { faceStatus: "RESCAN" },
       });
     }
   }
 
-  console.log(`[onboarding] Batch processing completed for section ${sectionId}.`);
+  if (failures > 0) {
+    throw new Error(`${failures} face onboarding item(s) failed before classifier training`);
+  }
 };
-
-
-

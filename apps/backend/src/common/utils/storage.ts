@@ -1,3 +1,4 @@
+
 import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
@@ -234,8 +235,9 @@ export const getPublicUrl = (
   const safeKey = normalizeStorageKey(storageKey);
 
   const baseUrl =
-    process.env.BACKEND_BASE_URL ||
+    process.env.PUBLIC_BASE_URL ||
     process.env.LOCAL_UPLOAD_BASE_URL ||
+    process.env.BACKEND_BASE_URL ||
     `http://127.0.0.1:${process.env.PORT || 5000}`;
 
   const cleanBaseUrl = baseUrl.replace(/\/+$/, "");
@@ -297,3 +299,5 @@ export const initializeStorage = async (): Promise<void> => {
     `[Storage] Storage root: ${STORAGE_ROOT}`
   );
 };
+
+

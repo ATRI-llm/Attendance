@@ -1,3 +1,4 @@
+
 import prisma from "../../database/prisma";
 import { validateGeofence } from "../../common/utils/geofence";
 import { mlQueue } from "../../queues/ml.queue";
@@ -208,11 +209,29 @@ export const createFaceOnboardingService = async (
     },
   });
 
-  /*
-   * ----------------------------------------------------------
-   * RETURN
-   * ----------------------------------------------------------
-   */
+  // Queue the actual embedding extraction. The previous implementation
+  // stopped after setting PENDING, leaving every onboarding job stranded.
+  const mlJob = await prisma.mlProcessingJob.create({
+    data: {
+      onboardingSessionId: onboarding.id,
+      sectionId: student.sectionId,
+      jobType: "FACE_EMBEDDING_GENERATION",
+      status: "PENDING",
+    },
+  });
 
-  return onboarding;
+  await mlQueue.add("FACE_EMBEDDING_GENERATION", {
+    mlJobId: mlJob.id,
+    onboardingSessionId: onboarding.id,
+    studentId: student.id,
+    sectionId: student.sectionId,
+  }, {
+    removeOnComplete: 100,
+    removeOnFail: 100,
+  });
+
+  return {
+    ...onboarding,
+    mlJobId: mlJob.id,
+  };
 };

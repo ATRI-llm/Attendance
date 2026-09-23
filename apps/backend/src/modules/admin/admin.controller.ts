@@ -1,43 +1,45 @@
-import { Request,Response } from "express";
+
+import { Request, Response } from "express";
 import { createStudentSchema } from "./admin.validation";
-import { createSchoolService, createStandardService,createSectionService,getSchoolsService, getStandardsBySchool,createTeacherService, createStudentService, getTeachersService, getStudentsService, getTeacherById, getStudentById,updateStudentService,updateTeacherService,deleteStudentService,deleteTeacherService, getAllSchoolsService, getSectionsByStandardService,getDashboardStatsService,updateFaceStatusService,deleteSchoolService,updateSchoolService,deleteSectionService,deleteStandardService,updateSectionService,updateStandardService} from "./admin.service";
+import { saveMulterFile, generateStorageFilename, getPublicUrl } from "../../common/utils/storage";
+import { createSchoolService, createStandardService, createSectionService, getSchoolsService, getStandardsBySchool, createTeacherService, createStudentService, getTeachersService, getStudentsService, getTeacherById, getStudentById, updateStudentService, updateTeacherService, deleteStudentService, deleteTeacherService, getAllSchoolsService, getSectionsByStandardService, getDashboardStatsService, updateFaceStatusService, deleteSchoolService, updateSchoolService, deleteSectionService, deleteStandardService, updateSectionService, updateStandardService } from "./admin.service";
 
 
-export const createSchool = async (req:Request, res:Response)=>{
-    try{
-        const {
-          name,
-          address,
-          district,
-          state,
-          pinCode,
-          contactNumber,
-          latitude,
-          longitude,
-          geoRadius,
-        } = req.body;
+export const createSchool = async (req: Request, res: Response) => {
+  try {
+    const {
+      name,
+      address,
+      district,
+      state,
+      pinCode,
+      contactNumber,
+      latitude,
+      longitude,
+      geoRadius,
+    } = req.body;
 
-        const school = await createSchoolService({
-          name,
-          address,
-          district,
-          state,
-          pinCode,
-          contactNumber,
-          latitude,
-          longitude,
-          geoRadius,
-        });
+    const school = await createSchoolService({
+      name,
+      address,
+      district,
+      state,
+      pinCode,
+      contactNumber,
+      latitude,
+      longitude,
+      geoRadius,
+    });
 
-        return res.status(201).json({
-          success: true,
-          message: "School created",
-          data: school,
-        });;
-    }
-    catch(error:any){
-        res.status(400).json({message: error.message});
-    }
+    return res.status(201).json({
+      success: true,
+      message: "School created",
+      data: school,
+    });;
+  }
+  catch (error: any) {
+    res.status(400).json({ message: error.message });
+  }
 
 }
 
@@ -51,8 +53,8 @@ export const getAllSchools = async (req: Request, res: Response) => {
   });
 };
 
-export const createStandard = async(req:Request,res:Response)=>{
-    try {
+export const createStandard = async (req: Request, res: Response) => {
+  try {
     const standard = await createStandardService(req.body);
 
     return res.json({
@@ -137,7 +139,7 @@ export const createSection = async (req: Request, res: Response) => {
       data: section,
     });
   } catch (error: any) {
-    
+
     if (error.code === "P2002") {
       return res.status(400).json({
         success: false,
@@ -195,9 +197,9 @@ export const getStandards = async (req: Request, res: Response) => {
 
 
 
-export const updateStandard = async (req:Request, res:Response) => {
+export const updateStandard = async (req: Request, res: Response) => {
   try {
-    const id  = req.params.id as string;
+    const id = req.params.id as string;
     const { name } = req.body;
 
     const standard = await updateStandardService(id, name);
@@ -215,9 +217,9 @@ export const updateStandard = async (req:Request, res:Response) => {
   }
 };
 
-export const deleteStandard = async (req:Request, res:Response) => {
+export const deleteStandard = async (req: Request, res: Response) => {
   try {
-    const id  = req.params.id as string;
+    const id = req.params.id as string;
 
     await deleteStandardService(id);
 
@@ -233,7 +235,7 @@ export const deleteStandard = async (req:Request, res:Response) => {
   }
 };
 
-export const updateSection = async (req:Request, res:Response) => {
+export const updateSection = async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
     const { name } = req.body;
@@ -253,9 +255,9 @@ export const updateSection = async (req:Request, res:Response) => {
   }
 };
 
-export const deleteSection = async (req:Request, res:Response) => {
+export const deleteSection = async (req: Request, res: Response) => {
   try {
-    const id  = req.params.id as string;
+    const id = req.params.id as string;
 
     await deleteSectionService(id);
 
@@ -291,29 +293,29 @@ export const createTeacher = async (req: Request, res: Response) => {
   }
 };
 
-export const getTeachers = async (req:Request, res:Response) =>{
-  const {page, limit, search} = req.query;
+export const getTeachers = async (req: Request, res: Response) => {
+  const { page, limit, search } = req.query;
 
   const result = await getTeachersService({
-    page:Number(page),
-    limit:Number(limit),
+    page: Number(page),
+    limit: Number(limit),
     search: search as string,
   });
 
   return res.status(200).json({
     success: true,
-    message:"Teacher fetched successfully!",
-    data:result,
+    message: "Teacher fetched successfully!",
+    data: result,
   })
 }
 
-export const getTeacher = async(req:Request, res:Response)=>{
+export const getTeacher = async (req: Request, res: Response) => {
   const teacher = await getTeacherById(req.params.id as string);
 
   return res.status(200).json({
     success: true,
-    mesaage:"Teacher fetched successfully!",
-    data:teacher,
+    mesaage: "Teacher fetched successfully!",
+    data: teacher,
   })
 
 }
@@ -359,10 +361,16 @@ export const createStudent = async (req: Request, res: Response) => {
       rollNumber: Number(req.body.rollNumber),
     });
 
+    let profileImage: string | undefined;
+    if (req.file) {
+      const storageKey = `uploads/students/${parsed.sectionId}/${generateStorageFilename(req.file.originalname)}`;
+      await saveMulterFile(req.file, storageKey);
+      profileImage = getPublicUrl(storageKey);
+    }
+
     const student = await createStudentService({
       ...parsed,
-
-      profileImage: req.file ? (req.file as any).path : undefined,
+      profileImage,
     });
 
     return res.status(201).json({
@@ -407,19 +415,24 @@ export const getStudent = async (req: Request, res: Response) => {
   });
 };
 
-export const updateStudent = async (req: Request,res: Response) => {
-  try{
+export const updateStudent = async (req: Request, res: Response) => {
+  try {
+    let profileImage: string | undefined;
+    if (req.file) {
+      const storageKey = `uploads/students/${req.params.id}/${generateStorageFilename(req.file.originalname)}`;
+      await saveMulterFile(req.file, storageKey);
+      profileImage = getPublicUrl(storageKey);
+    }
+
     const updated = await updateStudentService(
       req.params.id as string,
       {
         ...req.body,
-  
-        rollNumber: Number(req.body.rollNumber),
-  
-        profileImage: req.file ? (req.file as any).path : undefined,
+        rollNumber: req.body.rollNumber ? Number(req.body.rollNumber) : undefined,
+        profileImage,
       }
     );
-  
+
     return res.status(200).json({
       success: true,
       message: "Student updated successfully",
@@ -470,3 +483,5 @@ export const updateFaceStatus = async (req: Request, res: Response) => {
     data: updated,
   });
 };
+
+

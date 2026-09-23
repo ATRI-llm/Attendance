@@ -7,28 +7,35 @@ dotenv.config();
 
 const JWT_SECRET = process.env.JWT_SECRET as string;
 
-export const loginUser=async(identifier:string, password:string)=>{
+export const loginUser = async (identifier: string, password: string) => {
     console.log("Before DB query");
 
-    const user = await prisma.user.findFirst({
-        where:{
-            OR:[
-                {userCode:identifier},
-                {mobileNumber:identifier}
-            ]
-        }
+    const users = await prisma.user.findMany({
+        where: {
+            OR: [
+                { userCode: identifier },
+                { mobileNumber: identifier },
+            ],
+        },
+        take: 2,
     });
 
-    if(!user){
+    if (users.length === 0) {
         throw new Error("User not found");
     }
+
+    if (users.length > 1) {
+        throw new Error("Multiple accounts match this identifier; use your user code");
+    }
+
+    const user = users[0];
 
     console.log("After DB query");
     console.log("Before bcrypt");
 
 
     const isMatch = await bcrypt.compare(password, user.passwordHash);
-    if(!isMatch){
+    if (!isMatch) {
         throw new Error("Invalid Password");
     }
 
@@ -36,17 +43,17 @@ export const loginUser=async(identifier:string, password:string)=>{
 
     const token = jwt.sign(
         {
-        userId: user.id,
-        role: user.role,
+            userId: user.id,
+            role: user.role,
         },
         JWT_SECRET,
         { expiresIn: "7d" }
     );
 
-    return{
+    return {
         token,
-        user:{
-            id:user.id,
+        user: {
+            id: user.id,
             userCode: user.userCode,
             role: user.role
         }
@@ -55,15 +62,15 @@ export const loginUser=async(identifier:string, password:string)=>{
 
 
 export const getMeService = async (userId: string) => {
-  return prisma.user.findUnique({
-    where: { id: userId },
-    select: {
-      id: true,
-      userCode: true,
-      role: true,
-      firstName: true,
-      lastName: true,
-      mobileNumber: true,
-    },
-  });
+    return prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+            id: true,
+            userCode: true,
+            role: true,
+            firstName: true,
+            lastName: true,
+            mobileNumber: true,
+        },
+    });
 };

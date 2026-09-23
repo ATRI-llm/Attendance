@@ -2,6 +2,8 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import path from "path";
+import prisma from "./database/prisma";
+import { redisConnection } from "./config/redis";
 
 import authRoutes from "./modules/auth/auth.routes";
 import adminRoutes from "./modules/admin/admin.routes";
@@ -18,6 +20,10 @@ import {
 } from "./common/utils/storage";
 
 dotenv.config();
+
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
+  throw new Error("JWT_SECRET must be set and at least 32 characters long");
+}
 
 const app = express();
 
@@ -134,9 +140,26 @@ app.use(
  */
 
 app.get("/", (_req, res) => {
-  res.status(200).send(
-    "API is Running!"
-  );
+  res.status(200).json({ success: true, service: "backend", status: "ok" });
+});
+
+app.get("/health", async (_req, res) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    await redisConnection.ping();
+    return res.status(200).json({
+      status: "ok",
+      database: "ok",
+      redis: "ok",
+    });
+  } catch (error: any) {
+    return res.status(503).json({
+      status: "degraded",
+      database: "unknown",
+      redis: "unknown",
+      message: error.message,
+    });
+  }
 });
 
 /*

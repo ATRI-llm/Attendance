@@ -23,31 +23,31 @@ export const createSchoolService = async (data: {
 };
 
 
-export const createStandardService= async(data: {name:string; schoolId:string;})=>{
-    const school = await prisma.school.findUnique({
-        where:{
-            id:data.schoolId
-        }
-    });
-
-    if(!school){
-        throw new Error("School Not Found");
+export const createStandardService = async (data: { name: string; schoolId: string; }) => {
+  const school = await prisma.school.findUnique({
+    where: {
+      id: data.schoolId
     }
+  });
 
-    const num = Number(data.name);
+  if (!school) {
+    throw new Error("School Not Found");
+  }
 
-    if (isNaN(num)) {
-      throw new Error("Standard must be a number");
-    }
+  const num = Number(data.name);
 
-    const standard = await prisma.standard.create({
-        data:{
-            value: num,
-            schoolId: data.schoolId,
-        },
-    });
+  if (isNaN(num)) {
+    throw new Error("Standard must be a number");
+  }
 
-    return standard;
+  const standard = await prisma.standard.create({
+    data: {
+      value: num,
+      schoolId: data.schoolId,
+    },
+  });
+
+  return standard;
 }
 
 
@@ -137,18 +137,112 @@ export const getStandardsBySchool = async (schoolId: string) => {
   return standards;
 };
 
-
 export const deleteSchoolService = async (id: string) => {
   const school = await prisma.school.findUnique({
     where: { id },
+    include: {
+      standards: {
+        include: {
+          sections: {
+            include: {
+              students: true,
+              teachers: true,
+              attendanceSessions: true,
+              mealSessions: true,
+              FaceOnboardingSession: true,
+              modelAssets: true,
+            },
+          },
+        },
+      },
+    },
   });
 
   if (!school) {
     throw new Error("School not found");
   }
 
-  await prisma.school.delete({
-    where: { id },
+  const sections = school.standards.flatMap(
+    (standard) => standard.sections
+  );
+
+  const studentCount = sections.reduce(
+    (total, section) => total + section.students.length,
+    0
+  );
+
+  const teacherAssignmentCount = sections.reduce(
+    (total, section) => total + section.teachers.length,
+    0
+  );
+
+  const attendanceSessionCount = sections.reduce(
+    (total, section) => total + section.attendanceSessions.length,
+    0
+  );
+
+  const mealSessionCount = sections.reduce(
+    (total, section) => total + section.mealSessions.length,
+    0
+  );
+
+  const onboardingSessionCount = sections.reduce(
+    (total, section) =>
+      total + section.FaceOnboardingSession.length,
+    0
+  );
+
+  const modelAssetCount = sections.reduce(
+    (total, section) => total + section.modelAssets.length,
+    0
+  );
+
+  const hasDependentData =
+    studentCount > 0 ||
+    teacherAssignmentCount > 0 ||
+    attendanceSessionCount > 0 ||
+    mealSessionCount > 0 ||
+    onboardingSessionCount > 0 ||
+    modelAssetCount > 0;
+
+  if (hasDependentData) {
+    throw new Error(
+      `Cannot delete school because it contains dependent data. ` +
+      `Students: ${studentCount}, ` +
+      `Teacher assignments: ${teacherAssignmentCount}, ` +
+      `Attendance sessions: ${attendanceSessionCount}, ` +
+      `Meal sessions: ${mealSessionCount}, ` +
+      `Face onboarding sessions: ${onboardingSessionCount}, ` +
+      `Model assets: ${modelAssetCount}. ` +
+      `Remove/archive the dependent data before deleting the school.`
+    );
+  }
+
+  await prisma.$transaction(async (tx) => {
+    /*
+     * GeofenceValidation does not currently have
+     * onDelete: Cascade, so remove its history first.
+     */
+    await tx.geofenceValidation.deleteMany({
+      where: {
+        schoolId: id,
+      },
+    });
+
+    /*
+     * Standard -> Section uses database cascade,
+     * and Section -> Standard also uses cascade.
+     *
+     * At this point there must be no students,
+     * teacher assignments, attendance sessions,
+     * meal sessions, onboarding sessions or model
+     * assets preventing deletion.
+     */
+    await tx.school.delete({
+      where: {
+        id,
+      },
+    });
   });
 
   return true;
@@ -261,14 +355,14 @@ export const getTeachersService = async (query: {
 
   const whereCondition: any = query.search
     ? {
-        user: {
-          OR: [
-            { firstName: { contains: query.search, mode: "insensitive" } },
-            { lastName: { contains: query.search, mode: "insensitive" } },
-            { userCode: { contains: query.search, mode: "insensitive" } },
-          ],
-        },
-      }
+      user: {
+        OR: [
+          { firstName: { contains: query.search, mode: "insensitive" } },
+          { lastName: { contains: query.search, mode: "insensitive" } },
+          { userCode: { contains: query.search, mode: "insensitive" } },
+        ],
+      },
+    }
     : {};
 
   const [teachers, total] = await Promise.all([
@@ -333,6 +427,13 @@ export const updateTeacherService = async (id: string, data: any) => {
   });
 
   if (!teacher) throw new Error("Teacher not found");
+
+  if (data.mobileNumber) {
+    const conflictingUser = await prisma.user.findFirst({
+      where: { mobileNumber: data.mobileNumber, NOT: { id: teacher.userId } },
+    });
+    if (conflictingUser) throw new Error("User with this mobile number already exists");
+  }
 
   // update user fields
   await prisma.user.update({
@@ -409,6 +510,13 @@ export const createStudentService = async (data: {
     throw new Error("Section not found");
   }
 
+  const existingUser = await prisma.user.findFirst({
+    where: { mobileNumber: data.mobileNumber },
+  });
+  if (existingUser) {
+    throw new Error("User with this mobile number already exists");
+  }
+
   const existingStudent = await prisma.student.findFirst({
     where: {
       sectionId: data.sectionId,
@@ -427,7 +535,7 @@ export const createStudentService = async (data: {
   const userCode = generateUserCode("STUDENT", count);
 
   const hashedPassword = await bcrypt.hash(data.password, 10);
-  
+
 
   const student = await prisma.student.create({
     data: {
@@ -440,7 +548,7 @@ export const createStudentService = async (data: {
           mobileNumber: data.mobileNumber,
           passwordHash: hashedPassword,
           status: "ACTIVE",
-        },  
+        },
       },
 
       section: {
@@ -546,11 +654,21 @@ export const getStudentById = async (id: string) => {
 
 
 export const updateStudentService = async (id: string, data: any) => {
+  const existingStudent = await prisma.student.findUnique({ where: { id } });
+  if (!existingStudent) throw new Error("Student not found");
+
+  if (data.mobileNumber) {
+    const conflictingUser = await prisma.user.findFirst({
+      where: { mobileNumber: data.mobileNumber, NOT: { id: existingStudent.userId } },
+    });
+    if (conflictingUser) throw new Error("User with this mobile number already exists");
+  }
+
   const updated = await prisma.student.update({
     where: { id },
 
     data: {
-      ...(data.rollNumber !== undefined && {rollNumber: Number(data.rollNumber), }),
+      ...(data.rollNumber !== undefined && { rollNumber: Number(data.rollNumber), }),
 
       ...(data.sectionId && {
         section: {
@@ -623,12 +741,15 @@ export const getAllSchoolsService = async () => {
 
 
 export const getDashboardStatsService = async () => {
-  const [students, teachers, schools,sections,standards] = await Promise.all([
+  const [students, teachers, schools, sections, standards, added, pending, rescan] = await Promise.all([
     prisma.student.count(),
     prisma.teacher.count(),
     prisma.school.count(),
     prisma.section.count(),
     prisma.standard.count(),
+    prisma.student.count({ where: { faceStatus: "ADDED" } }),
+    prisma.student.count({ where: { faceStatus: "PENDING" } }),
+    prisma.student.count({ where: { faceStatus: "RESCAN" } }),
   ]);
 
   return {
@@ -637,6 +758,7 @@ export const getDashboardStatsService = async () => {
     totalSchools: schools,
     totalSections: sections,
     totalStandards: standards,
+    faceStatus: { added, pending, rescan },
   };
 };
 
@@ -644,7 +766,7 @@ export const getDashboardStatsService = async () => {
 // update face status
 export const updateFaceStatusService = async (
   studentId: string,
-  faceStatus: "NOT_ADDED" | "ADDED" | "RESCAN"
+  faceStatus: "NOT_ADDED" | "PENDING" | "ADDED" | "RESCAN"
 ) => {
   const student = await prisma.student.findUnique({
     where: { id: studentId },
@@ -657,5 +779,3 @@ export const updateFaceStatusService = async (
     data: { faceStatus },
   });
 };
-
-

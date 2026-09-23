@@ -114,20 +114,33 @@ export const createAttendanceService = async (
    * ----------------------------------------------------------
    */
 
+  const now = new Date();
+  const dayStart = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate()
+  ));
+  const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+
+  const existingSession = await prisma.attendanceSession.findFirst({
+    where: {
+      sectionId: body.sectionId,
+      date: { gte: dayStart, lt: dayEnd },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  if (existingSession) {
+    throw new Error("Attendance has already been started for this section today");
+  }
+
   const attendanceSession =
     await prisma.attendanceSession.create({
       data: {
-        sectionId:
-          body.sectionId,
-
-        teacherUserId:
-          userId,
-
-        date:
-          new Date(),
-
-        status:
-          "PENDING",
+        sectionId: body.sectionId,
+        teacherUserId: userId,
+        date: dayStart,
+        status: "PENDING",
       },
     });
 
@@ -234,9 +247,10 @@ export const createAttendanceService = async (
 
 export const getAttendanceSessionService =
   async (
+    userId: string,
     sessionId: string
   ) => {
-    return prisma.attendanceSession.findUnique({
+    const session = await prisma.attendanceSession.findUnique({
       where: {
         id: sessionId,
       },
@@ -248,8 +262,27 @@ export const getAttendanceSessionService =
             student: true,
           },
         },
+        mlJobs: {
+          orderBy: { createdAt: "desc" },
+          take: 1,
+        },
       },
     });
+
+    if (!session) return null;
+
+    const teacherSection = await prisma.teacherSection.findFirst({
+      where: {
+        teacher: { userId },
+        sectionId: session.sectionId,
+      },
+    });
+
+    if (!teacherSection) {
+      throw new Error("Attendance session not accessible");
+    }
+
+    return session;
   };
 
 /*
@@ -260,8 +293,19 @@ export const getAttendanceSessionService =
 
 export const finalizeAttendanceService =
   async (
+    userId: string,
     sessionId: string
   ) => {
+    const session = await prisma.attendanceSession.findUnique({
+      where: { id: sessionId },
+    });
+    if (!session) throw new Error("Attendance session not found");
+
+    const teacherSection = await prisma.teacherSection.findFirst({
+      where: { teacher: { userId }, sectionId: session.sectionId },
+    });
+    if (!teacherSection) throw new Error("Attendance session not accessible");
+
     return prisma.attendanceSession.update({
       where: {
         id: sessionId,
@@ -281,9 +325,24 @@ export const finalizeAttendanceService =
 
 export const updateAttendanceRecordService =
   async (
+    userId: string,
     recordId: string,
     status: string
   ) => {
+    const record = await prisma.attendanceRecord.findUnique({
+      where: { id: recordId },
+      include: { attendanceSession: true },
+    });
+    if (!record) throw new Error("Attendance record not found");
+
+    const teacherSection = await prisma.teacherSection.findFirst({
+      where: {
+        teacher: { userId },
+        sectionId: record.attendanceSession.sectionId,
+      },
+    });
+    if (!teacherSection) throw new Error("Attendance record not accessible");
+
     return prisma.attendanceRecord.update({
       where: {
         id: recordId,

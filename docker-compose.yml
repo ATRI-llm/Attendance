@@ -1,21 +1,4 @@
-# School AI Monitoring System — Full Stack Docker Compose
-#
-# Services:
-#   postgres    — PostgreSQL 15 (lightweight alpine)
-#   redis       — Redis 7 (lightweight alpine)
-#   backend     — Node.js Express API (port 5000)
-#   ml-worker   — Node.js BullMQ consumer (no port)
-#   ml-service  — Python FastAPI ML server (port 8000)
-#   web-admin   — Next.js admin dashboard (port 3000)
-#
-# Usage:
-#   cp .env.example .env    # fill in your values
-#   docker compose up -d    # start all services
-#   docker compose logs -f  # tail logs
-#   docker compose down     # stop everything
-
 services:
-
   postgres:
     image: postgres:15-alpine
     container_name: school_postgres
@@ -28,13 +11,13 @@ services:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    networks:
-      - school_network
+    networks: [ school_network ]
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-school_db}" ]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 10s
 
   redis:
     image: redis:7-alpine
@@ -44,15 +27,13 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
-    networks:
-      - school_network
+    networks: [ school_network ]
     healthcheck:
       test: [ "CMD", "redis-cli", "ping" ]
       interval: 10s
       timeout: 5s
-      retries: 5
-
-  # ── Backend API (Node.js + Express + Prisma) ────────────────────
+      retries: 10
+      start_period: 5s
 
   backend:
     build:
@@ -63,12 +44,14 @@ services:
     environment:
       NODE_ENV: production
       PORT: 5000
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:Kkr%4013245@postgres:5432/${POSTGRES_DB:-school_db}
-      JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-school_db}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
       REDIS_HOST: redis
       REDIS_PORT: 6379
       STORAGE_ROOT: /app/storage
       BACKEND_BASE_URL: http://backend:5000
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:5000}
+      BACKEND_TOKEN: ${BACKEND_TOKEN:?BACKEND_TOKEN must be set in .env}
     ports:
       - "5000:5000"
     volumes:
@@ -78,16 +61,13 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    networks:
-      - school_network
+    networks: [ school_network ]
     healthcheck:
-      test: [ "CMD-SHELL", "wget -qO- http://127.0.0.1:5000/ || exit 1" ]
+      test: [ "CMD-SHELL", "wget -qO- http://127.0.0.1:5000/health >/dev/null || exit 1" ]
       interval: 15s
       timeout: 5s
-      retries: 5
-      start_period: 30s
-
-  # ── Python FastAPI ML Service ────────────────────────────────────
+      retries: 10
+      start_period: 45s
 
   ml-service:
     build:
@@ -96,11 +76,13 @@ services:
     container_name: school_ml_service
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:Kkr%4013245@postgres:5432/${POSTGRES_DB:-school_db}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-school_db}
       STORAGE_ROOT: /app/storage
       BACKEND_BASE_URL: http://backend:5000
       BACKEND_URL: http://backend:5000/api
-      BACKEND_TOKEN: ${BACKEND_TOKEN:-}
+      BACKEND_TOKEN: ${BACKEND_TOKEN:?BACKEND_TOKEN must be set in .env}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:5000}
+      FACE_MATCH_THRESHOLD: ${FACE_MATCH_THRESHOLD:-0.55}
     ports:
       - "8000:8000"
     volumes:
@@ -108,16 +90,15 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    networks:
-      - school_network
+      backend:
+        condition: service_healthy
+    networks: [ school_network ]
     healthcheck:
-      test: [ "CMD-SHELL", "curl -f http://127.0.0.1:8000/health || exit 1" ]
+      test: [ "CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health >/dev/null || exit 1" ]
       interval: 15s
       timeout: 5s
-      retries: 5
-      start_period: 40s
-
-  # ── Node.js ML Worker (BullMQ consumer) ─────────────────────────
+      retries: 10
+      start_period: 60s
 
   ml-worker:
     build:
@@ -129,12 +110,16 @@ services:
       NODE_ENV: production
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:Kkr%4013245@postgres:5432/${POSTGRES_DB:-school_db}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-school_db}
       BACKEND_URL: http://backend:5000/api
       ML_SERVICE_URL: http://ml-service:8000
-      BACKEND_TOKEN: ${BACKEND_TOKEN:-}
+      BACKEND_TOKEN: ${BACKEND_TOKEN:?BACKEND_TOKEN must be set in .env}
       STORAGE_ROOT: /app/storage
       BACKEND_BASE_URL: http://backend:5000
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:5000}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+      TRAINING_POLL_INTERVAL_MS: ${TRAINING_POLL_INTERVAL_MS:-5000}
+      TRAINING_MAX_POLLS: ${TRAINING_MAX_POLLS:-120}
     volumes:
       - ./storage:/app/storage
     depends_on:
@@ -144,45 +129,35 @@ services:
         condition: service_healthy
       ml-service:
         condition: service_healthy
-    networks:
-      - school_network
-
-  # ── Web Admin Dashboard (Next.js) ────────────────────────────────
+    networks: [ school_network ]
 
   web-admin:
     build:
       context: ./apps/web-admin
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: http://backend:5000/api
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:5000/api}
     container_name: school_web_admin
     restart: unless-stopped
     environment:
       NODE_ENV: production
-      NEXT_PUBLIC_API_URL: http://backend:5000/api
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:5000/api}
     ports:
       - "3000:3000"
     depends_on:
       backend:
         condition: service_healthy
-    networks:
-      - school_network
+    networks: [ school_network ]
     healthcheck:
-      test: [ "CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ || exit 1" ]
+      test: [ "CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ >/dev/null || exit 1" ]
       interval: 15s
       timeout: 5s
-      retries: 5
-      start_period: 30s
-
-# ── Volumes ──────────────────────────────────────────────────────
+      retries: 10
+      start_period: 45s
 
 volumes:
   postgres_data:
-    driver: local
   redis_data:
-    driver: local
-
-# ── Networks ─────────────────────────────────────────────────────
 
 networks:
   school_network:

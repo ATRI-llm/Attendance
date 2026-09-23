@@ -1,105 +1,56 @@
 import { Worker } from "bullmq";
 import { redisConnection } from "../config/redis";
+import { processFaceOnboardingJob } from "../services/onboarding.service";
+import { processTrainClassifierJob } from "../services/train_classifier.service";
+import { processAttendanceJob } from "../services/attendance.service";
+import { processMealJob } from "../services/meal.service";
 
-import {
-  processFaceOnboardingJob,
-} from "../services/onboarding.service";
+export const mlWorker = new Worker(
+  "ml-processing",
+  async (job) => {
+    console.log(`[worker] Processing job ${job.id} (${job.name})`);
 
-import {
-  processTrainClassifierJob,
-} from "../services/train_classifier.service";
+    switch (job.name) {
+      case "FACE_EMBEDDING_GENERATION":
+        await processFaceOnboardingJob(job.data);
+        return;
 
-import {
-  processMealJob,
-} from "../services/meal.service";
+      case "ATTENDANCE_PROCESSING":
+        await processAttendanceJob(job.data);
+        return;
 
-export const mlWorker =
-  new Worker(
-    "ml-processing",
+      case "MEAL_COUNT_PROCESSING":
+        await processMealJob(job.data);
+        return;
 
-    async (job) => {
+      case "TRAIN_CLASSIFIER":
+        await processTrainClassifierJob(job.data);
+        return;
 
-      console.log("Processing Job:",job.id);
-      console.log("Job Name:",job.name);
-
-      try {
-
-        switch (job.name) {
-
-          case "FACE_EMBEDDING_GENERATION":
-
-            await processFaceOnboardingJob(
-              job.data
-            );
-
-            break;
-
-          case "TRAIN_CLASSIFIER":
-
-            await processTrainClassifierJob(
-              job.data
-            );
-
-            break;
-
-          case "MEAL_COUNT_PROCESSING":
-            await processMealJob(
-              job.data
-            );
-            break;
-
-          default:
-
-            console.log(
-              "Unknown job type:",
-              job.name
-            );
-        }
-
-      } catch (error: any) {
-
-        console.log(
-          "Worker Error:"
-        );
-
-        console.log(
-          error.message
-        );
-
-        throw error;
-      }
-    },
-
-    {
-      connection:
-        redisConnection,
-
-      concurrency: 2,
+      default:
+        throw new Error(`Unknown ML job type: ${job.name}`);
     }
+  },
+  {
+    connection: redisConnection,
+    concurrency: Number(process.env.ML_WORKER_CONCURRENCY || 2),
+  }
+);
+
+mlWorker.on("ready", () => {
+  console.log("[worker] ML worker is ready");
+});
+
+mlWorker.on("completed", (job) => {
+  console.log(`[worker] Completed job ${job.id} (${job.name})`);
+});
+
+mlWorker.on("failed", (job, error) => {
+  console.error(
+    `[worker] Failed job ${job?.id ?? "unknown"} (${job?.name ?? "unknown"}): ${error.message}`
   );
+});
 
-mlWorker.on(
-  "completed",
-
-  (job) => {
-
-    console.log(
-      `Completed Job ${job.id}`
-    );
-  }
-);
-
-mlWorker.on(
-  "failed",
-
-  (job,error) => {
-
-    console.log(
-      `Failed Job ${job?.id}`
-    );
-
-    console.log(
-      error.message
-    );
-  }
-);
+mlWorker.on("error", (error) => {
+  console.error(`[worker] Worker error: ${error.message}`);
+});

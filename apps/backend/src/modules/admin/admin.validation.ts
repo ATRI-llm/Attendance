@@ -3,19 +3,20 @@ import { z } from "zod";
 export const createTeacherSchema = z.object({
   firstName: z.string().min(2, "First name required"),
   lastName: z.string().min(2, "Last name required"),
-  mobileNumber: z.string().min(10,"Mobile number must be 10 digits").max(10,"Mobile number must be 10 digits"),
-  password: z.string().min(6,"Password must be at least 6 characters"),
+  mobileNumber: z.string().min(10, "Mobile number must be 10 digits").max(10, "Mobile number must be 10 digits"),
+  password: z.string().min(6, "Password must be at least 6 characters"),
   sectionIds: z.array(z.string()).min(1, "At least one section required"),
 });
 
 export const createStudentSchema = z.object({
   firstName: z.string().min(2),
   lastName: z.string().min(2),
-  mobileNumber: z.string().min(10).max(10),
+  mobileNumber: z.string().regex(/^\d{10}$/, "Mobile number must be 10 digits"),
   password: z.string().min(6),
-  sectionId: z.string(),
+  sectionId: z.string().uuid(),
   rollNumber: z.coerce.number().int().positive(),
-  dateOfBirth: z.string(),
+  dateOfBirth: z.string().refine((value) => !Number.isNaN(new Date(value).getTime()), "Invalid date of birth"),
+  profileImage: z.string().optional(),
 });
 
 

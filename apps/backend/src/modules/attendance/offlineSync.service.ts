@@ -181,6 +181,17 @@ export const offlineSyncService = async (
     );
   }
 
+  const teacherSection = await prisma.teacherSection.findFirst({
+    where: {
+      teacher: { userId },
+      sectionId: attendanceSession.sectionId,
+    },
+  });
+
+  if (!teacherSection) {
+    throw new Error("Section not assigned to this teacher");
+  }
+
   /*
    * ----------------------------------------------------------
    * PROCESS OFFLINE IMAGES
@@ -319,7 +330,7 @@ export const offlineSyncService = async (
               ...(record.confidence !==
                 undefined
                 ? {
-                  confidence:
+                  confidenceScore:
                     record.confidence,
                 }
                 : {}),
@@ -352,7 +363,7 @@ export const offlineSyncService = async (
               ...(record.confidence !==
                 undefined
                 ? {
-                  confidence:
+                  confidenceScore:
                     record.confidence,
                 }
                 : {}),
@@ -386,6 +397,16 @@ export const offlineSyncService = async (
    * deciding the appropriate session status.
    */
 
+  await prisma.attendanceSession.update({
+    where: { id: attendanceSession.id },
+    data: {
+      isOfflineSync: true,
+      deviceId: (payload as any).deviceId,
+      backboneVersion: (payload as any).backboneVersion,
+      classifierVersion: (payload as any).classifierVersion,
+    },
+  });
+
   return {
     success: true,
 
@@ -401,4 +422,3 @@ export const offlineSyncService = async (
       processedRecords,
   };
 };
-

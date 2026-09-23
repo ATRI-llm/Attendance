@@ -1,5 +1,6 @@
 const getBackendBaseUrl = (): string => {
   return (
+    process.env.PUBLIC_BASE_URL ||
     process.env.BACKEND_BASE_URL ||
     process.env.BACKEND_URL?.replace(/\/api\/?$/, "") ||
     "http://localhost:5000"
@@ -7,29 +8,24 @@ const getBackendBaseUrl = (): string => {
 };
 
 /**
- * Convert stored local storage references into URLs
- * that the Python ML service can access.
+ * Convert stored upload references into URLs that the ML service can access.
  *
- * No cloud signing is required; files are served from local shared storage.
+ * PUBLIC_BASE_URL should point to a hostname reachable from the ML service.
+ * In Docker Compose this should normally be the backend's public/reverse-proxy
+ * URL rather than the internal hostname `backend` when the URL will also be
+ * exposed to phones or other clients.
  */
-export async function resolveImageUrls(
-  urls: string[]
-): Promise<string[]> {
+export async function resolveImageUrls(urls: string[]): Promise<string[]> {
   const baseUrl = getBackendBaseUrl();
 
   return urls.map((value) => {
-    if (!value) {
-      return value;
-    }
+    if (!value) return value;
 
-    // Already a complete URL.
     if (/^https?:\/\//i.test(value)) {
       return value;
     }
 
-    const normalized = value
-      .replace(/\\/g, "/")
-      .replace(/^\/+/, "");
+    const normalized = value.replace(/\\/g, "/").replace(/^\/+/, "");
 
     if (normalized.startsWith("uploads/")) {
       return `${baseUrl}/${normalized}`;
