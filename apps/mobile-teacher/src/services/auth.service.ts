@@ -1,21 +1,20 @@
 import { api } from "../lib/api";
+import { LoginResponse } from "../types/auth.types";
 
-export const loginTeacher = async (identifier: string,password: string) => {
+export const loginTeacher = async (identifier: string, password: string): Promise<LoginResponse> => {
   try {
-    const response = await api.post("/auth/login",{identifier, password,});
-    return response.data;
+    const response = await api.post("/auth/login", { identifier, password });
+    if (!response.data?.token || !response.data?.user) {
+      throw new Error("Backend returned an invalid login response.");
+    }
+    return response.data as LoginResponse;
   } catch (error: any) {
-
-    console.log("FULL LOGIN ERROR:", error);
-
-    if(error.response){
+    if (error?.response) {
       throw new Error(error.response.data?.message || "Login failed");
     }
-
-    if(error.request){
-      throw new Error("Cannot connect to server. Please check your internet connection.");
+    if (error?.request) {
+      throw new Error("Cannot connect to the backend. Check USB reverse/ADB or network settings.");
     }
-
-    throw new Error("Unexpected error occurred");
+    throw new Error(error?.message || "Unexpected login error");
   }
 };

@@ -7,10 +7,12 @@
     "icon": "./assets/images/icon.png",
     "scheme": "mobileteacher",
     "userInterfaceStyle": "automatic",
+
     "ios": {
       "icon": "./assets/expo.icon",
       "bundleIdentifier": "com.anonymous.mobileteacher"
     },
+
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -21,11 +23,13 @@
       "predictiveBackGestureEnabled": false,
       "package": "com.anonymous.mobileteacher"
     },
+
     "web": {
       "bundler": "metro",
       "output": "static",
       "favicon": "./assets/images/favicon.png"
     },
+
     "plugins": [
       "expo-router",
       [
@@ -39,8 +43,9 @@
         }
       ],
       "expo-secure-store",
-      "expo-asset"
+      "expo-asset",
     ],
+
     "experiments": {
       "typedRoutes": true
     }

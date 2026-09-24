@@ -1,6 +1,7 @@
 import { create } from "zustand";
+import { getToken, removeToken, saveToken } from "../lib/storage";
 
-interface User {
+export interface AuthUser {
   id: string;
   userCode: string;
   role: string;
@@ -8,30 +9,36 @@ interface User {
 
 interface AuthState {
   token: string | null;
-  user: User | null;
+  user: AuthUser | null;
   isAuthenticated: boolean;
-
-  setAuth: (token: string, user: User) => void;
-
-  logout: () => void;
+  hydrated: boolean;
+  setAuth: (token: string, user: AuthUser) => Promise<void>;
+  hydrate: () => Promise<void>;
+  logout: () => Promise<void>;
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
   token: null,
   user: null,
   isAuthenticated: false,
+  hydrated: false,
 
-  setAuth: (token, user) =>
-    set({
-      token,
-      user,
-      isAuthenticated: true,
-    }),
+  setAuth: async (token, user) => {
+    await saveToken(token);
+    set({ token, user, isAuthenticated: true, hydrated: true });
+  },
 
-  logout: () =>
-    set({
-      token: null,
-      user: null,
-      isAuthenticated: false,
-    }),
+  hydrate: async () => {
+    try {
+      const token = await getToken();
+      set({ token, isAuthenticated: Boolean(token), hydrated: true });
+    } catch {
+      set({ token: null, isAuthenticated: false, hydrated: true });
+    }
+  },
+
+  logout: async () => {
+    await removeToken();
+    set({ token: null, user: null, isAuthenticated: false, hydrated: true });
+  },
 }));

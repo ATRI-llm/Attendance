@@ -7,51 +7,44 @@ import Toast from "react-native-toast-message";
 import NetInfo, { NetInfoState } from "@react-native-community/netinfo";
 
 import { initLocalDb } from "@/src/db/localDb";
-import { syncOfflineAttendance } from "@/src/services/syncManager.service";
+import { syncOfflineAttendance, syncOfflineMeals } from "@/src/services/syncManager.service";
 import { useAuthStore } from "@/src/store/auth.store";
 
 export default function RootLayout() {
   const wasOfflineRef = useRef(false);
-  const { token } = useAuthStore();
+  const { token, hydrate } = useAuthStore();
 
-  // ── Initialize local SQLite database on first launch ────────────
   useEffect(() => {
-    initLocalDb().catch((err) => {
-      console.error("[Layout] Failed to initialize local DB:", err);
-    });
-  }, []);
+    void initLocalDb().catch((err) => console.error("[Layout] Local DB init failed:", err));
+    void hydrate();
+  }, [hydrate]);
 
-  // ── Auto-sync when network reconnects ───────────────────────────
-  // Only fires when the device transitions from offline → online.
-  // This ensures offline attendance sessions get uploaded as soon
-  // as connectivity is restored without any teacher action.
   useEffect(() => {
     const unsubscribe = NetInfo.addEventListener((state: NetInfoState) => {
-      const isConnected = state.isConnected && state.isInternetReachable !== false;
+      const connected = state.isConnected === true && state.isInternetReachable !== false;
 
-      if (!isConnected) {
+      if (!connected) {
         wasOfflineRef.current = true;
         return;
       }
 
-      // Network just came back after being offline
       if (wasOfflineRef.current && token) {
         wasOfflineRef.current = false;
-        console.log("[Layout] Network restored. Manual sync available in View Attendance.");
+        void syncOfflineAttendance(token).catch((err) =>
+          console.warn("[Layout] Attendance auto-sync failed:", err?.message || err)
+        );
+        void syncOfflineMeals(token).catch((err) =>
+          console.warn("[Layout] Meal auto-sync failed:", err?.message || err)
+        );
       }
     });
 
-    return () => unsubscribe();
+    return unsubscribe;
   }, [token]);
 
   return (
     <SafeAreaProvider>
-      <Stack
-        screenOptions={{
-          headerShown: false,
-        }}
-      />
-
+      <Stack screenOptions={{ headerShown: false }} />
       <Toast />
     </SafeAreaProvider>
   );

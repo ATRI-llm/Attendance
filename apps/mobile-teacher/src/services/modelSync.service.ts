@@ -1,11 +1,6 @@
-/**
- * services/modelSync.service.ts
- * Downloads model assets and reference embeddings from the backend.
- */
-
 import * as FileSystem from "expo-file-system/legacy";
 import axios from "axios";
-import { API_URL } from "../lib/api";
+import { API_URL, API_ORIGIN, toMobileUrl } from "../lib/api";
 import { getActiveModelAsset, saveModelAsset } from "../db/modelAsset";
 import { cacheSectionStudents, getCachedStudents } from "../db/sectionStudentCache";
 import { useAttendanceStore } from "../store/attendance.store";
@@ -14,136 +9,143 @@ import { studentClassifier } from "../ml/classifier";
 import { CachedStudent } from "../types/model.types";
 
 const MODELS_DIR = `${FileSystem.documentDirectory}models/`;
+const MIN_MODEL_BYTES = 10 * 1024;
+
+const ensureModelsDir = async () => {
+  const info = await FileSystem.getInfoAsync(MODELS_DIR);
+  if (!info.exists) {
+    await FileSystem.makeDirectoryAsync(MODELS_DIR, { intermediates: true });
+  }
+};
+
+const isUsableFile = async (path: string): Promise<boolean> => {
+  try {
+    const info = await FileSystem.getInfoAsync(path);
+    return info.exists === true && (info.size ?? 0) >= MIN_MODEL_BYTES;
+  } catch {
+    return false;
+  }
+};
+
+const downloadRequired = async (url: string, destination: string): Promise<void> => {
+  const finalUrl = toMobileUrl(url);
+  const result = await FileSystem.downloadAsync(finalUrl, destination);
+  if (result.status < 200 || result.status >= 300) {
+    throw new Error(`Model download failed (${result.status}): ${finalUrl}`);
+  }
+  if (!(await isUsableFile(destination))) {
+    throw new Error(`Downloaded model is missing/too small: ${destination}`);
+  }
+};
+
+const downloadDetector = async (destination: string): Promise<void> => {
+  const candidates = [
+    `${API_ORIGIN}/models/det_500m.onnx`,
+    `${API_ORIGIN}/models/Det_Retina_Net.onnx`,
+    `${API_ORIGIN}/uploads/models/Det_Retina_Net.onnx`,
+  ];
+
+  let lastError: unknown;
+  for (const url of candidates) {
+    try {
+      await downloadRequired(url, destination);
+      return;
+    } catch (error) {
+      lastError = error;
+      console.warn("[ModelSync] Detector candidate failed:", url, error);
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Could not download the face detector model.");
+};
 
 export const syncModelAssets = async (sectionId: string, token: string): Promise<void> => {
-  try {
-    // 1. Check if we already have this model active locally
-    const localAsset = await getActiveModelAsset(sectionId);
-    let needsDownload = true;
+  await ensureModelsDir();
 
-    if (localAsset) {
-      let bbInfo: FileSystem.FileInfo = { exists: false, uri: "", isDirectory: false };
-      let clfInfo: FileSystem.FileInfo = { exists: false, uri: "", isDirectory: false };
-      let detInfo: FileSystem.FileInfo = { exists: false, uri: "", isDirectory: false };
-      
-      try {
-        bbInfo = await FileSystem.getInfoAsync(localAsset.backbonePath);
-        clfInfo = await FileSystem.getInfoAsync(localAsset.classifierPath);
-        detInfo = await FileSystem.getInfoAsync(`${MODELS_DIR}det_Det_Retina_Net.onnx`);
-      } catch (err) {
-        console.warn("[ModelSync] Error reading local model files (likely corrupted path). Forcing re-download.", err);
-      }
-
-      // If files exist, we can use the local model
-      if (bbInfo.exists && (bbInfo.size || 0) > 10000 && clfInfo.exists && (clfInfo.size || 0) > 10000 && detInfo.exists && (detInfo.size || 0) > 10000) {
-        console.log(`[ModelSync] Model exists locally. Skipping API fetch.`);
-        console.log(`[ModelSync] Location (Backbone): ${localAsset.backbonePath}`);
-        console.log(`[ModelSync] Location (Classifier): ${localAsset.classifierPath}`);
-        console.log(`[ModelSync] Location (Detector): ${MODELS_DIR}det_Det_Retina_Net.onnx`);
-        await loadModelsIntoMemory(localAsset.backbonePath, localAsset.classifierPath, localAsset.classifierVersion);
-        useAttendanceStore.getState().setActiveModel(localAsset);
-        needsDownload = false;
-        return; // Early return to prevent fetching
-      } else {
-        console.log("[ModelSync] Found corrupted local model. Forcing re-download.");
-      }
-    }
-
-    if (!needsDownload) return;
-
-    // 2. If no valid local model, fetch current active model metadata from server
-    const res = await axios.get(`${API_URL}/model-sync/assets/${sectionId}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-
-    const serverAsset = res.data.data;
-    if (!serverAsset) {
-      console.log("[ModelSync] No active model assigned to this section.");
+  const localAsset = await getActiveModelAsset(sectionId);
+  if (localAsset) {
+    const detectorPath = `${MODELS_DIR}detector.onnx`;
+    if (
+      (await isUsableFile(localAsset.backbonePath)) &&
+      (await isUsableFile(localAsset.classifierPath)) &&
+      (await isUsableFile(detectorPath))
+    ) {
+      await loadModelsIntoMemory(localAsset.backbonePath, localAsset.classifierPath, localAsset.classifierVersion);
+      useAttendanceStore.getState().setActiveModel(localAsset);
       return;
     }
-
-    console.log("[ModelSync] Downloading new model...");
-
-    // 3. Ensure models directory exists
-    const dirInfo = await FileSystem.getInfoAsync(MODELS_DIR);
-    if (!dirInfo.exists) {
-      await FileSystem.makeDirectoryAsync(MODELS_DIR, { intermediates: true });
-    }
-
-    // 4. Download backbone and classifier models
-    const bbFilename = `bb_${serverAsset.backboneVersion}.onnx`;
-    const clfFilename = `clf_${serverAsset.classifierVersion}.onnx`;
-    const detFilename = `det_Det_Retina_Net.onnx`;
-    const bbPath = `${MODELS_DIR}${bbFilename}`;
-    const clfPath = `${MODELS_DIR}${clfFilename}`;
-    const detPath = `${MODELS_DIR}${detFilename}`;
-
-    console.log(`[ModelSync] Downloading backbone to: ${bbPath}`);
-    await FileSystem.downloadAsync(serverAsset.backboneUrl, bbPath);
-
-    console.log(`[ModelSync] Downloading classifier to: ${clfPath}`);
-    await FileSystem.downloadAsync(serverAsset.classifierUrl, clfPath);
-
-    console.log(`[ModelSync] Downloading detector to: ${detPath}`);
-    // API_URL includes /api at the end, so we replace it to get the base URL
-    const baseUrl = API_URL.replace(/\/api$/, '');
-    const detectorUrl = `${baseUrl}/uploads/models/Det_Retina_Net.onnx`;
-    await FileSystem.downloadAsync(detectorUrl, detPath);
-
-    // 5. Save metadata to SQLite
-    const newLocalAsset = await saveModelAsset({
-      backboneVersion: serverAsset.backboneVersion,
-      classifierVersion: serverAsset.classifierVersion,
-      sectionId,
-      backbonePath: bbPath,
-      classifierPath: clfPath,
-    });
-
-    console.log("[ModelSync] Download complete. Loading models...");
-
-    // 6. Load into memory
-    await loadModelsIntoMemory(bbPath, clfPath, serverAsset.classifierVersion);
-
-    // 7. Update store
-    useAttendanceStore.getState().setActiveModel(newLocalAsset);
-
-  } catch (error) {
-    console.error("[ModelSync] Failed to sync model assets:", error);
   }
+
+  const res = await axios.get(`${API_URL}/model-sync/assets/${sectionId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+    timeout: 30000,
+  });
+
+  const serverAsset = res.data?.data;
+  if (!serverAsset) {
+    console.warn("[ModelSync] No active model is registered for this section.");
+    return;
+  }
+
+  const bbPath = `${MODELS_DIR}bb_${serverAsset.backboneVersion}.onnx`;
+  const clfPath = `${MODELS_DIR}clf_${serverAsset.classifierVersion}.onnx`;
+  const detectorPath = `${MODELS_DIR}detector.onnx`;
+
+  await downloadRequired(serverAsset.backboneUrl, bbPath);
+  await downloadRequired(serverAsset.classifierUrl, clfPath);
+  await downloadDetector(detectorPath);
+
+  const newLocalAsset = await saveModelAsset({
+    backboneVersion: serverAsset.backboneVersion,
+    classifierVersion: serverAsset.classifierVersion,
+    sectionId,
+    backbonePath: bbPath,
+    classifierPath: clfPath,
+  });
+
+  await loadModelsIntoMemory(bbPath, clfPath, serverAsset.classifierVersion);
+  useAttendanceStore.getState().setActiveModel(newLocalAsset);
 };
 
 export const syncStudentEmbeddings = async (sectionId: string, token: string): Promise<void> => {
   try {
     const res = await axios.get(`${API_URL}/model-sync/embeddings/${sectionId}`, {
       headers: { Authorization: `Bearer ${token}` },
+      timeout: 30000,
     });
 
-    const students: CachedStudent[] = res.data.data.students.map((s: any) => ({
+    const students: CachedStudent[] = (res.data?.data?.students ?? []).map((s: any) => ({
       ...s,
       sectionId,
+      embeddingVectors: s.embeddingVectors ?? [],
       cachedAt: new Date().toISOString(),
     }));
 
-    await cacheSectionStudents(students);
-    useAttendanceStore.getState().setSectionStudents(students);
-    console.log(`[ModelSync] Synced ${students.length} student embeddings from server.`);
-  } catch (error) {
-    console.log("[ModelSync] API fetch failed, falling back to local cache.");
-    const localStudents = await getCachedStudents(sectionId);
-    if (localStudents && localStudents.length > 0) {
-      useAttendanceStore.getState().setSectionStudents(localStudents);
-      console.log(`[ModelSync] Loaded ${localStudents.length} students from local cache.`);
-    } else {
-      console.error("[ModelSync] Failed to sync student embeddings and no local cache available.", error);
+    if (students.length > 0) {
+      await cacheSectionStudents(students);
+      useAttendanceStore.getState().setSectionStudents(students);
+      return;
     }
+
+    throw new Error("No students with embeddings were returned.");
+  } catch (error) {
+    const localStudents = await getCachedStudents(sectionId);
+    if (localStudents.length > 0) {
+      useAttendanceStore.getState().setSectionStudents(localStudents);
+      console.warn("[ModelSync] Using cached student embeddings.");
+      return;
+    }
+    throw error;
   }
 };
 
-export const loadModelsIntoMemory = async (bbPath: string, clfPath: string, clfVersion: string) => {
-  try {
-    await mobileFaceNet.loadModel(bbPath);
-    await studentClassifier.loadModel(clfPath, clfVersion);
-  } catch (err) {
-    console.warn("[ModelSync] Model stubs threw error (expected until ONNX wired):", err);
-  }
+export const loadModelsIntoMemory = async (
+  bbPath: string,
+  clfPath: string,
+  clfVersion: string
+) => {
+  await mobileFaceNet.loadModel(bbPath);
+  await studentClassifier.loadModel(clfPath, clfVersion);
 };
