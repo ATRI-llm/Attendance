@@ -49,6 +49,7 @@ services:
       REDIS_HOST: redis
       REDIS_PORT: 6379
       STORAGE_ROOT: /app/storage
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       BACKEND_BASE_URL: http://backend:5000
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:5000}
       BACKEND_TOKEN: ${BACKEND_TOKEN:?BACKEND_TOKEN must be set in .env}

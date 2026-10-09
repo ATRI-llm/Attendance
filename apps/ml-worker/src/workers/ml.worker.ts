@@ -33,8 +33,7 @@ export const mlWorker = new Worker(
   },
   {
     connection: redisConnection,
-    concurrency: Number(process.env.ML_WORKER_CONCURRENCY || 2),
-  }
+    concurrency: Number(process.env.WORKER_CONCURRENCY || 2),  }
 );
 
 mlWorker.on("ready", () => {

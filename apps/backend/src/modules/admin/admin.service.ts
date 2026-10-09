@@ -136,7 +136,6 @@ export const getStandardsBySchool = async (schoolId: string) => {
 
   return standards;
 };
-
 export const deleteSchoolService = async (id: string) => {
   const school = await prisma.school.findUnique({
     where: { id },
@@ -144,13 +143,8 @@ export const deleteSchoolService = async (id: string) => {
       standards: {
         include: {
           sections: {
-            include: {
-              students: true,
-              teachers: true,
-              attendanceSessions: true,
-              mealSessions: true,
-              FaceOnboardingSession: true,
-              modelAssets: true,
+            select: {
+              id: true,
             },
           },
         },
@@ -162,87 +156,223 @@ export const deleteSchoolService = async (id: string) => {
     throw new Error("School not found");
   }
 
-  const sections = school.standards.flatMap(
-    (standard) => standard.sections
+  const sectionIds = school.standards.flatMap((standard) =>
+    standard.sections.map((section) => section.id)
   );
 
-  const studentCount = sections.reduce(
-    (total, section) => total + section.students.length,
-    0
-  );
+  const students = await prisma.student.findMany({
+    where: {
+      sectionId: {
+        in: sectionIds,
+      },
+    },
+    select: {
+      id: true,
+      userId: true,
+    },
+  });
 
-  const teacherAssignmentCount = sections.reduce(
-    (total, section) => total + section.teachers.length,
-    0
-  );
+  const studentIds = students.map((student) => student.id);
+  const studentUserIds = students.map((student) => student.userId);
 
-  const attendanceSessionCount = sections.reduce(
-    (total, section) => total + section.attendanceSessions.length,
-    0
-  );
+  const teacherSections = await prisma.teacherSection.findMany({
+    where: {
+      sectionId: {
+        in: sectionIds,
+      },
+    },
+    select: {
+      teacherId: true,
+    },
+  });
 
-  const mealSessionCount = sections.reduce(
-    (total, section) => total + section.mealSessions.length,
-    0
-  );
+  const teacherIds = [
+    ...new Set(teacherSections.map((item) => item.teacherId)),
+  ];
 
-  const onboardingSessionCount = sections.reduce(
-    (total, section) =>
-      total + section.FaceOnboardingSession.length,
-    0
-  );
+  const teachers = await prisma.teacher.findMany({
+    where: {
+      id: {
+        in: teacherIds,
+      },
+    },
+    select: {
+      id: true,
+      userId: true,
+    },
+  });
 
-  const modelAssetCount = sections.reduce(
-    (total, section) => total + section.modelAssets.length,
-    0
-  );
-
-  const hasDependentData =
-    studentCount > 0 ||
-    teacherAssignmentCount > 0 ||
-    attendanceSessionCount > 0 ||
-    mealSessionCount > 0 ||
-    onboardingSessionCount > 0 ||
-    modelAssetCount > 0;
-
-  if (hasDependentData) {
-    throw new Error(
-      `Cannot delete school because it contains dependent data. ` +
-      `Students: ${studentCount}, ` +
-      `Teacher assignments: ${teacherAssignmentCount}, ` +
-      `Attendance sessions: ${attendanceSessionCount}, ` +
-      `Meal sessions: ${mealSessionCount}, ` +
-      `Face onboarding sessions: ${onboardingSessionCount}, ` +
-      `Model assets: ${modelAssetCount}. ` +
-      `Remove/archive the dependent data before deleting the school.`
-    );
-  }
+  const teacherUserIds = teachers.map((teacher) => teacher.userId);
 
   await prisma.$transaction(async (tx) => {
-    /*
-     * GeofenceValidation does not currently have
-     * onDelete: Cascade, so remove its history first.
-     */
     await tx.geofenceValidation.deleteMany({
       where: {
         schoolId: id,
       },
     });
 
-    /*
-     * Standard -> Section uses database cascade,
-     * and Section -> Standard also uses cascade.
-     *
-     * At this point there must be no students,
-     * teacher assignments, attendance sessions,
-     * meal sessions, onboarding sessions or model
-     * assets preventing deletion.
-     */
+    if (sectionIds.length > 0) {
+      await tx.mlProcessingJob.deleteMany({
+        where: {
+          sectionId: {
+            in: sectionIds,
+          },
+        },
+      });
+
+      await tx.modelAsset.deleteMany({
+        where: {
+          sectionId: {
+            in: sectionIds,
+          },
+        },
+      });
+
+      await tx.attendanceSession.deleteMany({
+        where: {
+          sectionId: {
+            in: sectionIds,
+          },
+        },
+      });
+
+      await tx.mealSession.deleteMany({
+        where: {
+          sectionId: {
+            in: sectionIds,
+          },
+        },
+      });
+
+      await tx.teacherSection.deleteMany({
+        where: {
+          sectionId: {
+            in: sectionIds,
+          },
+        },
+      });
+
+      await tx.faceOnboardingSession.deleteMany({
+        where: {
+          sectionId: {
+            in: sectionIds,
+          },
+        },
+      });
+
+      await tx.studentFaceImage.deleteMany({
+        where: {
+          studentId: {
+            in: studentIds,
+          },
+        },
+      });
+
+      await tx.studentFaceEmbedding.deleteMany({
+        where: {
+          studentId: {
+            in: studentIds,
+          },
+        },
+      });
+
+      await tx.attendanceCropImage.deleteMany({
+        where: {
+          studentId: {
+            in: studentIds,
+          },
+        },
+      });
+
+      await tx.attendanceRecord.deleteMany({
+        where: {
+          studentId: {
+            in: studentIds,
+          },
+        },
+      });
+
+      await tx.student.deleteMany({
+        where: {
+          id: {
+            in: studentIds,
+          },
+        },
+      });
+
+      await tx.section.deleteMany({
+        where: {
+          id: {
+            in: sectionIds,
+          },
+        },
+      });
+    }
+
+    await tx.standard.deleteMany({
+      where: {
+        schoolId: id,
+      },
+    });
+
     await tx.school.delete({
       where: {
         id,
       },
     });
+
+    if (studentUserIds.length > 0) {
+      await tx.user.deleteMany({
+        where: {
+          id: {
+            in: studentUserIds,
+          },
+        },
+      });
+    }
+
+    if (teacherUserIds.length > 0) {
+      const teachersStillAssigned = await tx.teacherSection.findMany({
+        where: {
+          teacherId: {
+            in: teacherIds,
+          },
+        },
+        select: {
+          teacherId: true,
+        },
+      });
+
+      const stillAssignedTeacherIds = new Set(
+        teachersStillAssigned.map((item) => item.teacherId)
+      );
+
+      const teacherIdsToDelete = teacherIds.filter(
+        (teacherId) => !stillAssignedTeacherIds.has(teacherId)
+      );
+
+      if (teacherIdsToDelete.length > 0) {
+        const teacherUsersToDelete = teachers
+          .filter((teacher) => teacherIdsToDelete.includes(teacher.id))
+          .map((teacher) => teacher.userId);
+
+        await tx.teacher.deleteMany({
+          where: {
+            id: {
+              in: teacherIdsToDelete,
+            },
+          },
+        });
+
+        await tx.user.deleteMany({
+          where: {
+            id: {
+              in: teacherUsersToDelete,
+            },
+          },
+        });
+      }
+    }
   });
 
   return true;

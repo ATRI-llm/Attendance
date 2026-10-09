@@ -5,8 +5,11 @@ import dotenv from "dotenv"
 
 dotenv.config();
 
-const JWT_SECRET = process.env.JWT_SECRET as string;
+const JWT_SECRET = process.env.JWT_SECRET?.trim();
 
+if (!JWT_SECRET) {
+    throw new Error("JWT_SECRET is required");
+}
 export const loginUser = async (identifier: string, password: string) => {
     console.log("Before DB query");
 

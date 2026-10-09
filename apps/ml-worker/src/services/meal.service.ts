@@ -2,7 +2,9 @@ import prisma from "../config/prisma";
 import axios from "axios";
 import { resolveImageUrls } from "../utils/storageUrls";
 
-const ML_URL = process.env.MODEL_URL || "http://localhost:8000";
+const ML_SERVICE_URL = (
+  process.env.ML_SERVICE_URL || process.env.MODEL_URL || "http://localhost:8000"
+).replace(/\/$/, "");
 
 export const processMealJob = async (data: any) => {
   console.log("Meal Processing:", data);
@@ -19,7 +21,7 @@ export const processMealJob = async (data: any) => {
 
     const imageUrls = await resolveImageUrls(images.map((img) => img.imageUrl));
 
-    const mlResponse = await axios.post(`${ML_URL}/meal`, {
+    const mlResponse = await axios.post(`${ML_SERVICE_URL}/meal`, {
       mealSessionId: data.mealSessionId,
       imageUrls: imageUrls
     }, { timeout: 60000 });

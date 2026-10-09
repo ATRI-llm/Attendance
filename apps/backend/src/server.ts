@@ -33,8 +33,20 @@ const app = express();
  * ------------------------------------------------------------
  */
 
-app.use(cors());
+const allowedOrigins = (
+  process.env.CORS_ORIGINS ||
+  "http://localhost:3000"
+)
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
+app.use(
+  cors({
+    origin: allowedOrigins,
+    credentials: true,
+  })
+);
 app.use(
   express.json({
     limit: "50mb",
@@ -152,12 +164,13 @@ app.get("/health", async (_req, res) => {
       database: "ok",
       redis: "ok",
     });
-  } catch (error: any) {
+  } catch (error) {
+    console.error("[Health] Dependency check failed:", error);
+
     return res.status(503).json({
       status: "degraded",
       database: "unknown",
       redis: "unknown",
-      message: error.message,
     });
   }
 });

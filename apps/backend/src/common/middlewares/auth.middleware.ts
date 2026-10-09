@@ -1,8 +1,12 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 
-const JWT_SECRET = process.env.JWT_SECRET as string;
-const BACKEND_TOKEN = process.env.BACKEND_TOKEN;
+const JWT_SECRET = process.env.JWT_SECRET?.trim();
+const BACKEND_TOKEN = process.env.BACKEND_TOKEN?.trim();
+
+if (!JWT_SECRET) {
+    throw new Error("JWT_SECRET is required");
+}
 
 interface JwtUserPayload extends jwt.JwtPayload {
     userId: string;
@@ -62,12 +66,6 @@ export const authenticate = (
     }
 
     try {
-        if (!JWT_SECRET) {
-            return res.status(500).json({
-                message: "JWT secret is not configured",
-            });
-        }
-
         const decoded = jwt.verify(token, JWT_SECRET);
 
         if (!isJwtUserPayload(decoded)) {

@@ -1,9 +1,13 @@
 import axios from "axios";
 import { getToken } from "./storage";
 
-const rawApiUrl =
-  process.env.EXPO_PUBLIC_API_URL?.trim() || "http://127.0.0.1:5000/api";
+const rawApiUrl = process.env.EXPO_PUBLIC_API_URL?.trim();
 
+if (!rawApiUrl) {
+  throw new Error(
+    "EXPO_PUBLIC_API_URL is required. Set it to the backend URL reachable from the teacher's device."
+  );
+}
 export const API_URL = rawApiUrl.replace(/\/+$/, "");
 
 export const API_ORIGIN = API_URL.replace(/\/api\/?$/, "");
